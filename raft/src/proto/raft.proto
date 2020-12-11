@@ -5,9 +5,13 @@ package raftpb;
 // Example RequestVote RPC arguments structure.
 message RequestVoteArgs {
     // Your data here (2A, 2B).
+    int32 term = 1;
+    int32 candidateId = 2;
 }
 
 // Example RequestVote RPC reply structure.
 message RequestVoteReply {
     // Your data here (2A).
+    int32 term = 1;
+    bool voteGranted = 2;
 }

@@ -1,5 +1,8 @@
-use std::sync::mpsc::{sync_channel, Receiver};
 use std::sync::Arc;
+use std::sync::{
+    mpsc::{sync_channel, Receiver},
+    Mutex,
+};
 
 use futures::channel::mpsc::UnboundedSender;
 
@@ -38,6 +41,16 @@ impl State {
     }
 }
 
+#[derive(Message)]
+pub struct Persistent {
+    #[prost(int32, tag = "1")]
+    current_term: i32,
+    #[prost(int32, tag = "2")]
+    voted_for: i32,
+    #[prost(bytes, tag = "3")]
+    log: Vec<u8>,
+}
+
 // A single Raft peer.
 pub struct Raft {
     // RPC end points of all peers
@@ -50,6 +63,14 @@ pub struct Raft {
     // Your data here (2A, 2B, 2C).
     // Look at the paper's Figure 2 for a description of what
     // state a Raft server must maintain.
+    current_term: i32,
+    voted_for: i32,
+    log: Vec<u8>,
+    commit_index: usize,
+    last_applied: usize,
+
+    next_index: Vec<u8>,
+    match_index: Vec<u8>,
 }
 
 impl Raft {
@@ -75,6 +96,14 @@ impl Raft {
             persister,
             me,
             state: Arc::default(),
+            current_term: 0,
+            voted_for: -1,
+            log: vec![],
+            commit_index: 0,
+            last_applied: 0,
+
+            next_index: vec![],
+            match_index: vec![],
         };
 
         // initialize from state persisted before a crash
@@ -92,6 +121,17 @@ impl Raft {
         // labcodec::encode(&self.xxx, &mut data).unwrap();
         // labcodec::encode(&self.yyy, &mut data).unwrap();
         // self.persister.save_raft_state(data);
+        let mut data = Vec::new();
+        // let msg = (&self.current_term, &self.voted_for, &self.log);
+        let per = Persistent {
+            current_term: self.current_term,
+            voted_for: self.voted_for,
+            log: self.log.clone(),
+        };
+        labcodec::encode(&per, &mut data).unwrap();
+        // labcodec::encode(&self.voted_for, &mut data).unwrap();
+        // labcodec::encode(&self.log, &mut data).unwrap();
+        self.persister.save_raft_state(data);
     }
 
     /// restore previously persisted state.
@@ -111,6 +151,16 @@ impl Raft {
         //         panic!("{:?}", e);
         //     }
         // }
+        match labcodec::decode::<Persistent>(data) {
+            Ok(o) => {
+                self.current_term = o.current_term;
+                self.voted_for = o.voted_for;
+                self.log = o.log;
+            }
+            Err(e) => {
+                panic!("{:?}", e);
+            }
+        }
     }
 
     /// example code to send a RequestVote RPC to a server.
@@ -201,13 +251,17 @@ impl Raft {
 #[derive(Clone)]
 pub struct Node {
     // Your code here.
+    raft: Arc<Mutex<Raft>>,
 }
 
 impl Node {
     /// Create a new raft service.
     pub fn new(raft: Raft) -> Node {
         // Your code here.
-        crate::your_code_here(raft)
+        // crate::your_code_here(raft)
+        Node {
+            raft: Arc::new(Mutex::new(raft)),
+        }
     }
 
     /// the service using Raft (e.g. a k/v server) wants to start
@@ -237,7 +291,9 @@ impl Node {
         // Your code here.
         // Example:
         // self.raft.term
-        crate::your_code_here(())
+        // crate::your_code_here(())
+        let raft = self.raft.lock().unwrap();
+        raft.state.term()
     }
 
     /// Whether this peer believes it is the leader.
@@ -245,7 +301,9 @@ impl Node {
         // Your code here.
         // Example:
         // self.raft.leader_id == self.id
-        crate::your_code_here(())
+        // crate::your_code_here(())
+        let raft = self.raft.lock().unwrap();
+        raft.state.is_leader()
     }
 
     /// The current state of this peer.
