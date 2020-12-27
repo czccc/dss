@@ -475,7 +475,7 @@ impl Raft {
                                 .unwrap();
                         } else if reply.vote_granted {
                             vote_count.fetch_add(1, Ordering::Relaxed);
-                            if vote_count.load(Ordering::SeqCst) >= peers_num / 2 {
+                            if vote_count.load(Ordering::SeqCst) > peers_num / 2 {
                                 role = RaftRole::Leader;
                                 tx.send(RaftEvent::BecomeLeader(reply.term)).await.unwrap();
                             }
