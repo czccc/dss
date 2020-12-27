@@ -1,0 +1,140 @@
+cargo fmt --all -- --check
+cargo clippy --all --tests -- -D clippy::all
+    Finished dev [unoptimized + debuginfo] target(s) in 0.06s
+RUST_LOG=raft=info,percolator=info cargo test -p raft -- --nocapture --test 2a
+    Finished test [unoptimized + debuginfo] target(s) in 0.04s
+     Running target/debug/deps/raft-f27cae30acf1fc3d
+
+running 2 tests
+test raft::tests::test_initial_election_2a ... [2020-12-27T08:50:15Z INFO  raft::raft] [Server 0 Follower ] [Term 0] [Log len 0] created!
+[2020-12-27T08:50:15Z INFO  raft::raft] Enter main executor!
+[2020-12-27T08:50:15Z INFO  raft::raft] [Server 1 Follower ] [Term 0] [Log len 0] created!
+[2020-12-27T08:50:15Z INFO  raft::raft] Enter main executor!
+[2020-12-27T08:50:15Z INFO  raft::raft] [Server 2 Follower ] [Term 0] [Log len 0] created!
+
+[2020-12-27T08:50:15Z INFO  raft::raft::config] Test (2A): initial election ...
+[2020-12-27T08:50:15Z INFO  raft::raft] Enter main executor!
+[2020-12-27T08:50:16Z INFO  raft::raft] [Follower  2] [Log 0] [Term 0] loss Leader connection
+[2020-12-27T08:50:16Z INFO  raft::raft] [Candidate 2] [Log 0] [Term 1] Become Candidate
+[2020-12-27T08:50:16Z INFO  raft::raft] [Candidate 2] [Log 0] [Term 1] Send request vote to ALL Node
+[2020-12-27T08:50:16Z INFO  raft::raft] [Follower  0] [Log 0] [Term 0] Handle request vote from Node 2, Vote true
+[2020-12-27T08:50:16Z INFO  raft::raft] [Follower  1] [Log 0] [Term 0] Handle request vote from Node 2, Vote true
+[2020-12-27T08:50:16Z INFO  raft::raft] [Leader    2] [Log 0] [Term 1] Become Leader
+[2020-12-27T08:50:16Z INFO  raft::raft] [Leader    2] [Log 0] [Term 1] Send append entries to ALL Node
+[2020-12-27T08:50:16Z INFO  raft::raft] [Follower  0] [Log 0] [Term 1] Become Follower. New Leader id: 2
+[2020-12-27T08:50:16Z INFO  raft::raft] [Follower  0] [Log 0] [Term 1] Handle append entries from Node 2, Success true
+[2020-12-27T08:50:16Z INFO  raft::raft] [Follower  1] [Log 0] [Term 1] Become Follower. New Leader id: 2
+[2020-12-27T08:50:16Z INFO  raft::raft] [Follower  1] [Log 0] [Term 1] Handle append entries from Node 2, Success true
+[2020-12-27T08:50:16Z INFO  raft::raft] [Leader    2] [Log 0] [Term 1] Send append entries to ALL Node
+[2020-12-27T08:50:16Z INFO  raft::raft] [Follower  0] [Log 0] [Term 1] Handle append entries from Node 2, Success true
+[2020-12-27T08:50:16Z INFO  raft::raft] [Follower  1] [Log 0] [Term 1] Handle append entries from Node 2, Success true
+[2020-12-27T08:50:17Z INFO  raft::raft] [Leader    2] [Log 0] [Term 1] Send append entries to ALL Node
+[2020-12-27T08:50:17Z INFO  raft::raft] [Follower  0] [Log 0] [Term 1] Handle append entries from Node 2, Success true
+[2020-12-27T08:50:17Z INFO  raft::raft] [Follower  1] [Log 0] [Term 1] Handle append entries from Node 2, Success true
+[2020-12-27T08:50:17Z INFO  raft::raft] [Leader    2] [Log 0] [Term 1] Send append entries to ALL Node
+[2020-12-27T08:50:17Z INFO  raft::raft] [Follower  0] [Log 0] [Term 1] Handle append entries from Node 2, Success true
+[2020-12-27T08:50:17Z INFO  raft::raft] [Follower  1] [Log 0] [Term 1] Handle append entries from Node 2, Success true
+[2020-12-27T08:50:17Z INFO  raft::raft] [Leader    2] [Log 0] [Term 1] Send append entries to ALL Node
+[2020-12-27T08:50:17Z INFO  raft::raft] [Follower  0] [Log 0] [Term 1] Handle append entries from Node 2, Success true
+[2020-12-27T08:50:17Z INFO  raft::raft] [Follower  1] [Log 0] [Term 1] Handle append entries from Node 2, Success true
+[2020-12-27T08:50:18Z INFO  raft::raft] [Leader    2] [Log 0] [Term 1] Send append entries to ALL Node
+[2020-12-27T08:50:18Z INFO  raft::raft] [Follower  0] [Log 0] [Term 1] Handle append entries from Node 2, Success true
+[2020-12-27T08:50:18Z INFO  raft::raft] [Follower  1] [Log 0] [Term 1] Handle append entries from Node 2, Success true
+[2020-12-27T08:50:18Z INFO  raft::raft] [Leader    2] [Log 0] [Term 1] Send append entries to ALL Node
+[2020-12-27T08:50:18Z INFO  raft::raft] [Follower  1] [Log 0] [Term 1] Handle append entries from Node 2, Success true
+[2020-12-27T08:50:18Z INFO  raft::raft] [Follower  0] [Log 0] [Term 1] Handle append entries from Node 2, Success true
+[2020-12-27T08:50:18Z INFO  raft::raft] [Leader    2] [Log 0] [Term 1] Send append entries to ALL Node
+[2020-12-27T08:50:18Z INFO  raft::raft] [Follower  0] [Log 0] [Term 1] Handle append entries from Node 2, Success true
+[2020-12-27T08:50:18Z INFO  raft::raft] [Follower  1] [Log 0] [Term 1] Handle append entries from Node 2, Success true
+[2020-12-27T08:50:19Z INFO  raft::raft] [Leader    2] [Log 0] [Term 1] Send append entries to ALL Node
+[2020-12-27T08:50:19Z INFO  raft::raft] [Follower  0] [Log 0] [Term 1] Handle append entries from Node 2, Success true
+[2020-12-27T08:50:19Z INFO  raft::raft] [Follower  1] [Log 0] [Term 1] Handle append entries from Node 2, Success true
+[2020-12-27T08:50:19Z INFO  raft::raft::config]   ... Passed --
+[2020-12-27T08:50:19Z INFO  raft::raft::config]   3.974289s  3 20 0
+[2020-12-27T08:50:19Z INFO  raft::raft] Leave main executor!
+[2020-12-27T08:50:19Z INFO  raft::raft] Leave main executor!
+[2020-12-27T08:50:19Z INFO  raft::raft] Leave main executor!
+ok
+test raft::tests::test_reelection_2a ... [2020-12-27T08:50:19Z INFO  raft::raft] [Server 0 Follower ] [Term 0] [Log len 0] created!
+[2020-12-27T08:50:19Z INFO  raft::raft] Enter main executor!
+[2020-12-27T08:50:19Z INFO  raft::raft] [Server 1 Follower ] [Term 0] [Log len 0] created!
+[2020-12-27T08:50:19Z INFO  raft::raft] Enter main executor!
+[2020-12-27T08:50:19Z INFO  raft::raft] [Server 2 Follower ] [Term 0] [Log len 0] created!
+
+[2020-12-27T08:50:19Z INFO  raft::raft] Enter main executor!
+[2020-12-27T08:50:19Z INFO  raft::raft::config] Test (2A): election after network failure ...
+[2020-12-27T08:50:20Z INFO  raft::raft] [Follower  1] [Log 0] [Term 0] loss Leader connection
+[2020-12-27T08:50:20Z INFO  raft::raft] [Candidate 1] [Log 0] [Term 1] Become Candidate
+[2020-12-27T08:50:20Z INFO  raft::raft] [Candidate 1] [Log 0] [Term 1] Send request vote to ALL Node
+[2020-12-27T08:50:20Z INFO  raft::raft] [Follower  2] [Log 0] [Term 0] Handle request vote from Node 1, Vote true
+[2020-12-27T08:50:20Z INFO  raft::raft] [Follower  0] [Log 0] [Term 0] Handle request vote from Node 1, Vote true
+[2020-12-27T08:50:20Z INFO  raft::raft] [Leader    1] [Log 0] [Term 1] Become Leader
+[2020-12-27T08:50:20Z INFO  raft::raft] [Leader    1] [Log 0] [Term 1] Send append entries to ALL Node
+[2020-12-27T08:50:20Z INFO  raft::raft] [Follower  0] [Log 0] [Term 1] Become Follower. New Leader id: 1
+[2020-12-27T08:50:20Z INFO  raft::raft] [Follower  2] [Log 0] [Term 1] Become Follower. New Leader id: 1
+[2020-12-27T08:50:20Z INFO  raft::raft] [Follower  2] [Log 0] [Term 1] Handle append entries from Node 1, Success true
+[2020-12-27T08:50:20Z INFO  raft::raft] [Follower  0] [Log 0] [Term 1] Handle append entries from Node 1, Success true
+[2020-12-27T08:50:20Z INFO  raft::raft] [Leader    1] [Log 0] [Term 1] Send append entries to ALL Node
+[2020-12-27T08:50:21Z INFO  raft::raft] [Leader    1] [Log 0] [Term 1] Send append entries to ALL Node
+[2020-12-27T08:50:21Z INFO  raft::raft] [Leader    1] [Log 0] [Term 1] Send append entries to ALL Node
+[2020-12-27T08:50:21Z INFO  raft::raft] [Leader    1] [Log 0] [Term 1] Send append entries to ALL Node
+[2020-12-27T08:50:22Z INFO  raft::raft] [Follower  2] [Log 0] [Term 1] loss Leader connection
+[2020-12-27T08:50:22Z INFO  raft::raft] [Candidate 2] [Log 0] [Term 2] Become Candidate
+[2020-12-27T08:50:22Z INFO  raft::raft] [Candidate 2] [Log 0] [Term 2] Send request vote to ALL Node
+[2020-12-27T08:50:22Z INFO  raft::raft] [Follower  0] [Log 0] [Term 1] Handle request vote from Node 2, Vote true
+[2020-12-27T08:50:22Z INFO  raft::raft] [Leader    2] [Log 0] [Term 2] Become Leader
+[2020-12-27T08:50:22Z INFO  raft::raft] [Leader    2] [Log 0] [Term 2] Send append entries to ALL Node
+[2020-12-27T08:50:22Z INFO  raft::raft] [Follower  0] [Log 0] [Term 2] Become Follower. New Leader id: 2
+[2020-12-27T08:50:22Z INFO  raft::raft] [Follower  0] [Log 0] [Term 2] Handle append entries from Node 2, Success true
+[2020-12-27T08:50:22Z INFO  raft::raft] [Leader    1] [Log 0] [Term 1] Send append entries to ALL Node
+[2020-12-27T08:50:22Z INFO  raft::raft] [Leader    2] [Log 0] [Term 2] Send append entries to ALL Node
+[2020-12-27T08:50:22Z INFO  raft::raft] [Follower  1] [Log 0] [Term 2] Become Follower. New Leader id: 2
+[2020-12-27T08:50:22Z INFO  raft::raft] [Follower  0] [Log 0] [Term 2] Handle append entries from Node 2, Success true
+[2020-12-27T08:50:22Z INFO  raft::raft] [Follower  1] [Log 0] [Term 2] Handle append entries from Node 2, Success true
+[2020-12-27T08:50:22Z INFO  raft::raft] [Leader    2] [Log 0] [Term 2] Send append entries to ALL Node
+[2020-12-27T08:50:22Z INFO  raft::raft] [Follower  1] [Log 0] [Term 2] Handle append entries from Node 2, Success true
+[2020-12-27T08:50:22Z INFO  raft::raft] [Follower  0] [Log 0] [Term 2] Handle append entries from Node 2, Success true
+[2020-12-27T08:50:23Z INFO  raft::raft] [Leader    2] [Log 0] [Term 2] Send append entries to ALL Node
+[2020-12-27T08:50:23Z INFO  raft::raft] [Leader    2] [Log 0] [Term 2] Send append entries to ALL Node
+[2020-12-27T08:50:23Z INFO  raft::raft] [Leader    2] [Log 0] [Term 2] Send append entries to ALL Node
+[2020-12-27T08:50:23Z INFO  raft::raft] [Follower  0] [Log 0] [Term 2] loss Leader connection
+[2020-12-27T08:50:23Z INFO  raft::raft] [Candidate 0] [Log 0] [Term 3] Become Candidate
+[2020-12-27T08:50:23Z INFO  raft::raft] [Candidate 0] [Log 0] [Term 3] Send request vote to ALL Node
+[2020-12-27T08:50:23Z INFO  raft::raft] [Follower  1] [Log 0] [Term 2] loss Leader connection
+[2020-12-27T08:50:23Z INFO  raft::raft] [Candidate 1] [Log 0] [Term 3] Become Candidate
+[2020-12-27T08:50:23Z INFO  raft::raft] [Candidate 1] [Log 0] [Term 3] Send request vote to ALL Node
+[2020-12-27T08:50:23Z INFO  raft::raft] [Leader    2] [Log 0] [Term 2] Send append entries to ALL Node
+[2020-12-27T08:50:24Z INFO  raft::raft] [Leader    2] [Log 0] [Term 2] Send append entries to ALL Node
+[2020-12-27T08:50:24Z INFO  raft::raft] [Leader    2] [Log 0] [Term 2] Send append entries to ALL Node
+[2020-12-27T08:50:24Z INFO  raft::raft] [Leader    2] [Log 0] [Term 2] Send append entries to ALL Node
+[2020-12-27T08:50:25Z INFO  raft::raft] [Candidate 0] [Log 0] [Term 3] loss Leader connection
+[2020-12-27T08:50:25Z INFO  raft::raft] [Candidate 0] [Log 0] [Term 4] Become Candidate
+[2020-12-27T08:50:25Z INFO  raft::raft] [Candidate 0] [Log 0] [Term 4] Send request vote to ALL Node
+[2020-12-27T08:50:25Z INFO  raft::raft] [Candidate 1] [Log 0] [Term 3] Handle request vote from Node 0, Vote true
+[2020-12-27T08:50:25Z INFO  raft::raft] [Leader    0] [Log 0] [Term 4] Become Leader
+[2020-12-27T08:50:25Z INFO  raft::raft] [Leader    0] [Log 0] [Term 4] Send append entries to ALL Node
+[2020-12-27T08:50:25Z INFO  raft::raft] [Follower  1] [Log 0] [Term 4] Become Follower. New Leader id: 0
+[2020-12-27T08:50:25Z INFO  raft::raft] [Follower  1] [Log 0] [Term 4] Handle append entries from Node 0, Success true
+[2020-12-27T08:50:25Z INFO  raft::raft] [Leader    2] [Log 0] [Term 2] Send append entries to ALL Node
+[2020-12-27T08:50:25Z INFO  raft::raft] [Leader    0] [Log 0] [Term 4] Handle append entries from Node 2, Success false
+[2020-12-27T08:50:25Z INFO  raft::raft] [Follower  1] [Log 0] [Term 4] Handle append entries from Node 2, Success false
+[2020-12-27T08:50:25Z INFO  raft::raft] [Follower  2] [Log 0] [Term 4] Become Follower
+[2020-12-27T08:50:25Z INFO  raft::raft] [Follower  2] [Log 0] [Term 4] Become Follower
+[2020-12-27T08:50:25Z INFO  raft::raft] [Leader    0] [Log 0] [Term 4] Send append entries to ALL Node
+[2020-12-27T08:50:25Z INFO  raft::raft] [Follower  1] [Log 0] [Term 4] Handle append entries from Node 0, Success true
+[2020-12-27T08:50:25Z INFO  raft::raft] [Follower  2] [Log 0] [Term 4] Handle append entries from Node 0, Success true
+[2020-12-27T08:50:25Z INFO  raft::raft::config]   ... Passed --
+[2020-12-27T08:50:25Z INFO  raft::raft::config]   6.4103664s  3 48 0
+[2020-12-27T08:50:25Z INFO  raft::raft] Leave main executor!
+[2020-12-27T08:50:25Z INFO  raft::raft] Leave main executor!
+[2020-12-27T08:50:25Z INFO  raft::raft] Leave main executor!
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 37 filtered out
+
+   Doc-tests raft
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
