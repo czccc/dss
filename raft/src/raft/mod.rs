@@ -1,5 +1,5 @@
 use std::{
-    cmp::min,
+    cmp::{max, min},
     sync::Arc,
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -23,17 +23,15 @@ use futures_timer::Delay;
 use rand::Rng;
 use tokio::runtime::Builder;
 
-const RAFT_ELECTION_TIMEOUT: Duration = Duration::from_millis(600);
-const RAFT_HEARTBEAT_TIMEOUT: Duration = Duration::from_millis(300);
-
 fn election_timeout() -> Duration {
-    let variant = rand::thread_rng().gen_range(0, 200);
-    RAFT_ELECTION_TIMEOUT + Duration::from_millis(variant)
+    let variant = rand::thread_rng().gen_range(600, 800);
+    Duration::from_millis(variant)
 }
 
 fn heartbeat_timeout() -> Duration {
-    let variant = rand::thread_rng().gen_range(0, 100);
-    RAFT_HEARTBEAT_TIMEOUT + Duration::from_millis(variant)
+    // let variant = rand::thread_rng().gen_range(100, 104);
+    let variant = 80;
+    Duration::from_millis(variant)
 }
 
 #[cfg(test)]
@@ -432,6 +430,8 @@ impl Raft {
             AppendEntriesReply {
                 term: self.current_term.load(Ordering::SeqCst),
                 success: false,
+                conflict_log_index: 0,
+                conflict_log_term: 0,
             }
         } else {
             if self.role != RaftRole::Follower
@@ -455,9 +455,21 @@ impl Raft {
                     "Handle append entries from {}, Success false due to log not match",
                     description
                 ));
+                let conflict_log_term = self
+                    .log
+                    .get(max(min(args.prev_log_index as usize, self.log.len()), 1) - 1)
+                    .map_or(0, |v| v.term);
                 AppendEntriesReply {
                     term: self.current_term.load(Ordering::SeqCst),
                     success: false,
+                    conflict_log_term,
+                    conflict_log_index: self
+                        .log
+                        .iter()
+                        .filter(|v| v.term == conflict_log_term)
+                        .take(1)
+                        .next()
+                        .map_or(0, |v| v.index),
                 }
             } else {
                 self.log.truncate(args.prev_log_index as usize);
@@ -476,6 +488,8 @@ impl Raft {
                 AppendEntriesReply {
                     term: self.current_term.load(Ordering::SeqCst),
                     success: true,
+                    conflict_log_index: 0,
+                    conflict_log_term: 0,
                 }
             }
         }
@@ -616,7 +630,7 @@ impl Raft {
         // let peers_num = self.peers.len();
         for server in 0..self.peers.len() {
             if server != self.me {
-                let prev_log_index = self.next_index[server].load(Ordering::SeqCst) - 1;
+                let prev_log_index = max(1, self.next_index[server].load(Ordering::SeqCst)) - 1;
                 let prev_log_term = {
                     if prev_log_index == 0 {
                         0
@@ -624,8 +638,8 @@ impl Raft {
                         self.log[(prev_log_index - 1) as usize].term
                     }
                 };
-                let upper_log_index = min(prev_log_index + 5, self.log.len() as u64);
-                // let upper_log_index = self.log.len() as u64;
+                // let upper_log_index = min(prev_log_index + 5, self.log.len() as u64);
+                let upper_log_index = self.log.len() as u64;
                 let entries = {
                     if prev_log_index < upper_log_index {
                         self.log[(prev_log_index as usize)..(upper_log_index as usize)].to_vec()
@@ -668,10 +682,19 @@ impl Raft {
                             } else if reply.success {
                                 match_index.store(upper_log_index, Ordering::SeqCst);
                                 next_index.store(upper_log_index + 1, Ordering::SeqCst);
-                            } else if next_index.load(Ordering::SeqCst) > 5 {
-                                next_index.fetch_sub(5, Ordering::SeqCst);
                             } else {
-                                next_index.store(1, Ordering::SeqCst)
+                                // if next_index.load(Ordering::SeqCst) > 5 {
+                                //     next_index.fetch_sub(5, Ordering::SeqCst);
+                                // } else {
+                                //     next_index.store(1, Ordering::SeqCst);
+                                // }
+                                // if let Some(v) = self
+                                //     .log
+                                //     .iter()
+                                //     .filter(|v| v.term == reply.conflict_log_term)
+                                //     .last()
+                                // {}
+                                next_index.store(reply.conflict_log_index, Ordering::SeqCst);
                             }
                         }
                     }
