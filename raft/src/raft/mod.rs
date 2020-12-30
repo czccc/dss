@@ -261,9 +261,9 @@ impl Raft {
                 .expect("Unable send ApplyMsg");
             self.last_applied.fetch_add(1, Ordering::SeqCst);
             self.log(&format!(
-                "Apply command: [ApplyMsg {}], {:?}",
+                "Apply command: [ApplyMsg {} Term {}]",
                 self.last_applied.load(Ordering::SeqCst),
-                self.log[self.last_applied.load(Ordering::SeqCst) as usize - 1]
+                self.log[self.last_applied.load(Ordering::SeqCst) as usize - 1].term
             ));
         }
     }
@@ -320,8 +320,8 @@ impl Raft {
             args.candidate_id, args.term, args.last_log_index, args.last_log_term
         );
         if args.term > self.current_term.load(Ordering::SeqCst) {
-            self.become_follower(args.term);
             self.voted_for = None;
+            self.become_follower(args.term);
         }
 
         if args.term < self.current_term.load(Ordering::SeqCst) {
@@ -445,6 +445,7 @@ impl Raft {
                     "Become Follower. New Leader id: {}",
                     args.leader_id
                 ));
+                self.persist();
             }
             if args.prev_log_index > (self.log.len() as u64)
                 || args.prev_log_index > 0
@@ -461,6 +462,7 @@ impl Raft {
             } else {
                 self.log.truncate(args.prev_log_index as usize);
                 self.log.extend(args.entries);
+                self.persist();
                 if args.leader_commit > self.commit_index.load(Ordering::SeqCst) {
                     self.commit_index.store(
                         min(args.leader_commit, self.log.len() as u64),
@@ -498,6 +500,7 @@ impl Raft {
                 index, term
             ));
             self.match_index[self.me] = Arc::new(AtomicU64::new(self.log.len() as u64));
+            self.persist();
             Ok((index, term))
         } else {
             Err(Error::NotLeader)
@@ -532,6 +535,7 @@ impl Raft {
             self.match_index[i] = Arc::new(AtomicU64::new(0));
         }
         self.match_index[self.me] = Arc::new(AtomicU64::new(self.log.len() as u64));
+        self.persist();
         self.log("Become Leader");
     }
     fn become_follower(&mut self, term: u64) {
@@ -539,6 +543,7 @@ impl Raft {
         // self.voted_for = None;
         self.role = RaftRole::Follower;
         self.is_leader.store(false, Ordering::SeqCst);
+        self.persist();
         self.log("Become Follower");
     }
     fn become_candidate(&mut self) {
@@ -546,6 +551,7 @@ impl Raft {
         self.role = RaftRole::Candidate;
         self.is_leader.store(false, Ordering::SeqCst);
         self.voted_for = Some(self.me);
+        self.persist();
         self.log("Become Candidate");
 
         self.send_request_vote_all();
