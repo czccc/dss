@@ -23,8 +23,8 @@ use futures_timer::Delay;
 use rand::Rng;
 use tokio::runtime::Builder;
 
-const RAFT_ELECTION_TIMEOUT: Duration = Duration::from_millis(600);
-const RAFT_HEARTBEAT_TIMEOUT: Duration = Duration::from_millis(300);
+const RAFT_ELECTION_TIMEOUT: Duration = Duration::from_millis(500);
+const RAFT_HEARTBEAT_TIMEOUT: Duration = Duration::from_millis(200);
 
 fn election_timeout() -> Duration {
     let variant = rand::thread_rng().gen_range(0, 200);
@@ -32,7 +32,7 @@ fn election_timeout() -> Duration {
 }
 
 fn heartbeat_timeout() -> Duration {
-    let variant = rand::thread_rng().gen_range(0, 100);
+    let variant = rand::thread_rng().gen_range(0, 50);
     RAFT_HEARTBEAT_TIMEOUT + Duration::from_millis(variant)
 }
 
@@ -778,6 +778,9 @@ impl Stream for RaftExecutor {
             Poll::Ready(Some(event)) => match event {
                 RaftEvent::RequestVote(args, tx) => {
                     let reply = self.raft.handle_request_vote(args);
+                    if reply.vote_granted {
+                        self.timeout.reset(election_timeout());
+                    }
                     let _ = tx.send(reply);
                     Poll::Ready(Some(()))
                 }
@@ -861,7 +864,11 @@ impl Node {
         let log_index = raft.log_index.clone();
 
         let mut raft_executor = RaftExecutor::new(raft);
-        let threaded_rt = Builder::new_multi_thread().build().unwrap();
+        let threaded_rt = Builder::new_multi_thread()
+            .thread_name("RaftExecutor")
+            .enable_all()
+            .build()
+            .unwrap();
         let handle = thread::spawn(move || {
             threaded_rt.block_on(async move {
                 debug!("Enter main executor!");
