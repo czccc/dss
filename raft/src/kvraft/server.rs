@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     sync::Arc,
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Mutex,
     },
     task::Poll,
@@ -25,10 +25,11 @@ use tokio::{runtime::Builder, time::timeout};
 use crate::proto::kvraftpb::*;
 use crate::raft;
 
-enum PendingOP {
-    Get(Sender<GetReply>, String, u64),
-    PutAppend(Sender<PutAppendReply>, String, u64),
-}
+// enum PendingOP {
+//     Get(Sender<KvReply>, String, u64),
+//     Put(Sender<KvReply>, String, u64),
+//     Append(Sender<KvReply>, String, u64),
+// }
 
 pub struct KvServer {
     pub rf: raft::Node,
@@ -46,8 +47,19 @@ pub struct KvServer {
 
     // DB
     db: Mutex<HashMap<String, String>>,
-    pending: HashMap<u64, PendingOP>,
-    last_index: HashMap<String, Arc<AtomicUsize>>,
+    pending: HashMap<u64, (Sender<KvReply>, KvRequest)>,
+    last_index: HashMap<String, Arc<AtomicU64>>,
+}
+
+impl std::fmt::Display for KvServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let desp = if self.is_leader.load(Ordering::SeqCst) {
+            String::from("Leader")
+        } else {
+            String::from("Follow")
+        };
+        write!(f, "[{} {}]", desp, self.me)
+    }
 }
 
 impl KvServer {
@@ -81,190 +93,141 @@ impl KvServer {
         }
     }
 
-    fn desp(&self) -> String {
-        if self.is_leader.load(Ordering::SeqCst) {
-            String::from("Leader")
-        } else {
-            String::from("Follow")
-        }
-    }
-
     // fn check_client(&self) {}
-
-    fn handle_get(&mut self, args: GetRequest, sender: Sender<GetReply>) {
-        info!(
-            "[Server {} -> Client {}] recv [GetRequest key: \"{}\" index: {}]",
-            self.me, args.name, args.key, args.index
-        );
+    fn handle_request(&mut self, args: KvRequest, sender: Sender<KvReply>) {
+        if self.is_leader.load(Ordering::SeqCst) {
+            info!("{} recv {}", self, args);
+        } else {
+            debug!("{} recv {}", self, args);
+        }
+        let reply_template = KvReply {
+            op: args.op,
+            success: false,
+            err: String::new(),
+            key: args.key.to_owned(),
+            value: String::new(),
+            name: args.name.to_owned(),
+            seq: args.seq.to_owned(),
+        };
+        if !self.last_index.contains_key(&args.name) {
+            self.last_index
+                .insert(args.name.clone(), Arc::new(AtomicU64::new(0)));
+        }
+        let last_index = self.last_index[&args.name].clone();
+        if args.seq < last_index.load(Ordering::SeqCst) {
+            let _ = sender.send(KvReply {
+                err: String::from("Duplicated Request"),
+                ..reply_template
+            });
+            return;
+        }
         let res = self.rf.start(&args);
         if res.is_err() {
-            let _ = sender.send(GetReply {
-                wrong_leader: true,
+            let _ = sender.send(KvReply {
                 err: String::from("NotLeader"),
-                value: String::new(),
+                ..reply_template
             });
             return;
         }
         let (index, _term) = res.unwrap();
 
         let (tx, rx) = channel();
-        if let Some(op) = self
-            .pending
-            .insert(index, PendingOP::Get(tx, args.name.to_owned(), args.index))
-        {
-            match op {
-                PendingOP::Get(tx, _name, _index) => {
-                    let _ = tx.send(GetReply {
-                        wrong_leader: true,
-                        err: String::from("Command uncommitted"),
-                        value: String::new(),
-                    });
-                }
-                PendingOP::PutAppend(tx, _name, _index) => {
-                    let _ = tx.send(PutAppendReply {
-                        wrong_leader: true,
-                        err: String::from("Command uncommitted"),
-                    });
-                }
-            }
-        }
+        self.pending.insert(index, (tx, args));
 
-        tokio::spawn(async {
-            let reply = match rx.await {
-                Ok(reply) => reply,
-                Err(_) => GetReply {
-                    wrong_leader: true,
-                    err: String::from("Channel Cancelled"),
-                    value: String::new(),
-                },
-            };
-            let _ = sender.send(reply);
-        });
-    }
-    fn handle_put_append(&mut self, args: PutAppendRequest, sender: Sender<PutAppendReply>) {
-        info!(
-            "[{} {} -> Client {}] recv [PutAppendRequest op: {} key: \"{}\" value: \"{}\" index: {}]",
-            self.desp(), self.me, args.name, args.op, args.key, args.value, args.index
-        );
-        let res = self.rf.start(&args);
-        if res.is_err() {
-            info!(
-                "[{} {} -> Client {}] send [PutAppendReply true NotLeader]",
-                self.desp(),
-                self.me,
-                args.name
-            );
-            let _ = sender.send(PutAppendReply {
-                wrong_leader: true,
-                err: String::from("NotLeader"),
-            });
-            return;
-        }
-        let (index, _term) = res.unwrap();
-
-        let (tx, rx) = channel();
-        if let Some(op) = self.pending.insert(
-            index,
-            PendingOP::PutAppend(tx, args.name.to_owned(), args.index),
-        ) {
-            match op {
-                PendingOP::Get(tx, _name, _index) => {
-                    let _ = tx.send(GetReply {
-                        wrong_leader: true,
-                        err: String::from("Command uncommitted"),
-                        value: String::new(),
-                    });
-                }
-                PendingOP::PutAppend(tx, _name, _index) => {
-                    let _ = tx.send(PutAppendReply {
-                        wrong_leader: true,
-                        err: String::from("Command uncommitted"),
-                    });
-                }
-            }
-        }
-        tokio::spawn(async {
-            let reply = match timeout(Duration::from_millis(2000), rx).await {
+        tokio::spawn(async move {
+            let reply = match timeout(Duration::from_millis(3000), rx).await {
                 Ok(Ok(reply)) => {
-                    // self.la
+                    last_index.store(reply.seq, Ordering::SeqCst);
                     reply
                 }
-                Ok(Err(_)) => PutAppendReply {
-                    wrong_leader: true,
+                Ok(Err(_)) => KvReply {
                     err: String::from("Timeout"),
+                    ..reply_template
                 },
-                Err(_) => PutAppendReply {
-                    wrong_leader: true,
+                Err(_) => KvReply {
                     err: String::from("Channel Cancelled"),
+                    ..reply_template
                 },
             };
             let _ = sender.send(reply);
         });
     }
+
     fn handle_apply_msg(&mut self, msg: ApplyMsg) {
         if !msg.command_valid {
             return;
         }
-        info!(
-            "Server {} recv [ApplyMsg {:?} {}]",
-            self.me, msg.command, msg.command_index
+        debug!(
+            "{} recv [ApplyMsg {} {}]",
+            self, msg.command_valid, msg.command_index
         );
         let index = msg.command_index;
-        if let Some(op) = self.pending.remove(&index) {
-            match op {
-                PendingOP::Get(tx, name, index) => {
-                    if let Ok(o) = labcodec::decode::<GetRequest>(&msg.command) {
-                        info!(
-                            "{} {} ApplyMsg decode to [GetRequest {} {} {}]",
-                            self.desp(),
-                            self.me,
-                            o.key,
-                            o.name,
-                            o.index
-                        );
-                        if name == o.name && index == o.index {
+        if let Ok(req) = labcodec::decode::<KvRequest>(&msg.command) {
+            if !self.last_index.contains_key(&req.name) {
+                self.last_index
+                    .insert(req.name.clone(), Arc::new(AtomicU64::new(0)));
+            }
+            if req.seq > self.last_index[&req.name].load(Ordering::SeqCst) {
+                self.last_index[&req.name].store(req.seq, Ordering::SeqCst);
+                match req.op {
+                    1 => {
+                        self.db
+                            .lock()
+                            .unwrap()
+                            .insert(req.key.clone(), req.value.clone());
+                    }
+                    2 => {
+                        let mut value = self
+                            .db
+                            .lock()
+                            .unwrap()
+                            .get(&req.key)
+                            .map_or(String::new(), |v| v.clone());
+                        value.push_str(&req.value);
+                        self.db.lock().unwrap().insert(req.key.clone(), value);
+                    }
+                    _ => {}
+                }
+            }
+            if let Some((tx, args)) = self.pending.remove(&index) {
+                let reply = KvReply {
+                    op: args.op,
+                    success: false,
+                    err: String::new(),
+                    key: args.key.to_owned(),
+                    value: String::new(),
+                    name: args.name.to_owned(),
+                    seq: args.seq.to_owned(),
+                };
+                if req != args {
+                    let _ = tx.send(KvReply {
+                        err: String::from("Command uncommitted"),
+                        ..reply
+                    });
+                } else if req.seq < self.last_index[&req.name].load(Ordering::SeqCst) {
+                    let _ = tx.send(KvReply {
+                        err: String::from("Duplicated Request"),
+                        ..reply
+                    });
+                } else {
+                    match args.op {
+                        1 | 2 | 3 => {
                             let value = self
                                 .db
                                 .lock()
                                 .unwrap()
-                                .get(&o.key)
+                                .get(&args.key)
                                 .map_or(String::new(), |v| v.to_owned());
-                            let _ = tx.send(GetReply {
-                                wrong_leader: false,
-                                err: String::new(),
+                            let _ = tx.send(KvReply {
+                                success: true,
                                 value,
+                                ..reply
                             });
                         }
-                    }
-                }
-                PendingOP::PutAppend(tx, name, index) => {
-                    if let Ok(o) = labcodec::decode::<PutAppendRequest>(&msg.command) {
-                        info!(
-                            "{} {} ApplyMsg decode to [PutAppendRequest {} {} {} {} {}]",
-                            self.desp(),
-                            self.me,
-                            o.op,
-                            o.key,
-                            o.value,
-                            o.name,
-                            o.index
-                        );
-                        if name == o.name && index == o.index {
-                            let value = self
-                                .db
-                                .lock()
-                                .unwrap()
-                                .get(&o.key)
-                                .map_or(String::new(), |v| v.to_owned());
-                            let value = match o.op {
-                                1 => o.value,
-                                2 => value + &o.value,
-                                _ => panic!("Unknown Op"),
-                            };
-                            self.db.lock().unwrap().insert(o.key, value);
-                            let _ = tx.send(PutAppendReply {
-                                wrong_leader: false,
-                                err: String::new(),
+                        _ => {
+                            let _ = tx.send(KvReply {
+                                err: String::from("Unknown Request"),
+                                ..reply
                             });
                         }
                     }
@@ -287,8 +250,7 @@ impl KvServer {
 
 #[derive(Debug)]
 enum KvEvent {
-    Get(GetRequest, Sender<GetReply>),
-    PutAppend(PutAppendRequest, Sender<PutAppendReply>),
+    Request(KvRequest, Sender<KvReply>),
     Shutdown,
 }
 
@@ -311,39 +273,20 @@ impl Stream for KvExecutor {
     ) -> Poll<Option<Self::Item>> {
         match self.server.receiver.poll_next_unpin(cx) {
             Poll::Ready(Some(event)) => {
-                info!(
-                    "[{} {}] Executor recv [Event]",
-                    self.server.desp(),
-                    self.server.me
-                );
+                debug!("{} Executor recv [Event]", self.server);
                 return match event {
-                    KvEvent::Get(args, tx) => {
-                        info!(
-                            "[{} {} -> Client {}] Executor recv [GetEvent {} {}]",
-                            self.server.desp(),
-                            self.server.me,
-                            args.name,
-                            args.key,
-                            args.index
+                    KvEvent::Request(args, tx) => {
+                        debug!(
+                            "{} -> [Client {}] Executor recv {}",
+                            self.server, args.name, args
                         );
-                        self.server.handle_get(args, tx);
-                        // let _ = tx.send(reply);
+                        self.server.handle_request(args, tx);
                         Poll::Ready(Some(()))
                     }
-                    KvEvent::PutAppend(args, tx) => {
-                        info!(
-                            "[{} {} -> Client {}] Executor recv [PutAppendEvent {} {} {}]",
-                            self.server.desp(),
-                            self.server.me,
-                            args.name,
-                            args.key,
-                            args.value,
-                            args.index
-                        );
-                        self.server.handle_put_append(args, tx);
-                        Poll::Ready(Some(()))
+                    KvEvent::Shutdown => {
+                        self.server.rf.kill();
+                        Poll::Ready(None)
                     }
-                    KvEvent::Shutdown => Poll::Ready(None),
                 };
             }
             Poll::Ready(None) => {}
@@ -399,15 +342,18 @@ impl Node {
 
         let mut raft_executor = KvExecutor::new(kv);
         let threaded_rt = Builder::new_multi_thread().enable_all().build().unwrap();
-        let handle = thread::spawn(move || {
-            threaded_rt.block_on(async move {
-                debug!("Enter KvRaft main executor!");
-                while raft_executor.next().await.is_some() {
-                    trace!("KvRaft: Get event");
-                }
-                debug!("Leave KvRaft main executor!");
+        let handle = thread::Builder::new()
+            .name(format!("KvServerNode-{}", me))
+            .spawn(move || {
+                threaded_rt.block_on(async move {
+                    debug!("Enter KvRaft main executor!");
+                    while raft_executor.next().await.is_some() {
+                        trace!("KvRaft: Get event");
+                    }
+                    debug!("Leave KvRaft main executor!");
+                })
             })
-        });
+            .unwrap();
         Node {
             handle: Arc::new(Mutex::new(handle)),
             me,
@@ -452,34 +398,18 @@ impl Node {
 
 #[async_trait::async_trait]
 impl KvService for Node {
-    // CAVEATS: Please avoid locking or sleeping here, it may jam the network.
-    async fn get(&self, arg: GetRequest) -> labrpc::Result<GetReply> {
-        // Your code here.
-        // crate::your_code_here(arg)
+    async fn request(&self, args: KvRequest) -> labrpc::Result<KvReply> {
         let (tx, rx) = channel();
-        let event = KvEvent::Get(arg, tx);
-        let _ = self.sender.clone().send(event).await;
-        // info!("Server {} recv service Get", self.me);
-        tokio::select! {
-            _ = Delay::new(Duration::from_millis(2000)) => {Err(labrpc::Error::Timeout)}
-            reply = rx => {reply.map_err(labrpc::Error::Recv)}
-        }
-    }
-
-    // CAVEATS: Please avoid locking or sleeping here, it may jam the network.
-    async fn put_append(&self, arg: PutAppendRequest) -> labrpc::Result<PutAppendReply> {
-        // Your code here.
-        // crate::your_code_here(arg)
-        // info!(
-        //     "[Server {} -> Client {}] recv service PutAppend",
-        //     self.me, arg.name
-        // );
-        let (tx, rx) = channel();
-        let event = KvEvent::PutAppend(arg, tx);
+        let event = KvEvent::Request(args, tx);
         let _ = self.sender.clone().send(event).await;
         tokio::select! {
-            _ = Delay::new(Duration::from_millis(2000)) => {Err(labrpc::Error::Timeout)}
-            reply = rx => {reply.map_err(labrpc::Error::Recv)}
+            _ = Delay::new(Duration::from_millis(3000)) => {
+                Err(labrpc::Error::Timeout)
+            }
+            reply = rx => {
+                reply.map_err(labrpc::Error::Recv)
+            }
         }
+        // rx.await.map_err(labrpc::Error::Recv)
     }
 }

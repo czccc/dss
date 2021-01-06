@@ -8,26 +8,38 @@ use std::{
     time::Duration,
 };
 
+use futures_timer::Delay;
 use tokio::runtime::Builder;
 
 use crate::proto::kvraftpb::*;
 
-enum Op {
-    Put(String, String),
-    Append(String, String),
-}
+// enum Op {
+//     Put(String, String),
+//     Append(String, String),
+// }
 
 pub struct Clerk {
     pub name: String,
     pub servers: Vec<KvClient>,
     // You will have to modify this struct.
     pub last_leader: Arc<AtomicUsize>,
-    index: Arc<AtomicU64>,
+    seq: Arc<AtomicU64>,
 }
 
 impl fmt::Debug for Clerk {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Clerk").field("name", &self.name).finish()
+    }
+}
+
+impl fmt::Display for Clerk {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "[Client {} Seq {}]",
+            self.name,
+            self.seq.load(Ordering::SeqCst)
+        )
     }
 }
 
@@ -38,7 +50,36 @@ impl Clerk {
             name,
             servers,
             last_leader: Arc::new(AtomicUsize::new(0)),
-            index: Arc::new(AtomicU64::new(1)),
+            seq: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    fn handle_request(&self, args: KvRequest) -> KvReply {
+        let last_leader = self.last_leader.clone();
+        let mut leader = last_leader.load(Ordering::SeqCst);
+        let server_num = self.servers.len();
+
+        let threaded_rt = Builder::new_multi_thread().enable_all().build().unwrap();
+        loop {
+            debug!("{} -> [Server {}] send {}", self, leader, args);
+            if let Ok(Ok(reply)) = threaded_rt.block_on(async {
+                tokio::select! {
+                    _ = Delay::new(Duration::from_millis(4000)) => {
+                        Err("Timeout")
+                    }
+                    reply = self.servers[leader].request(&args) => {
+                        Ok(reply)
+                    }
+                }
+            }) {
+                debug!("{} <- [Server {}] recv {}", self, leader, reply);
+                if reply.success {
+                    last_leader.store(leader, Ordering::SeqCst);
+                    return reply;
+                }
+            }
+            thread::sleep(Duration::from_millis(500));
+            leader = (leader + 1) % server_num;
         }
     }
 
@@ -49,92 +90,45 @@ impl Clerk {
     // you can send an RPC with code like this:
     // if let Some(reply) = self.servers[i].get(args).wait() { do something  }
     pub fn get(&self, key: String) -> String {
-        // You will have to modify this function.
-        // crate::your_code_here(key)
-        let index = self.index.fetch_add(1, Ordering::SeqCst);
-        let args = GetRequest {
+        let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let args = KvRequest {
+            op: 3,
             key,
+            value: String::new(),
             name: self.name.to_owned(),
-            index,
+            seq,
         };
-        let last_leader = self.last_leader.clone();
-        let mut leader = last_leader.load(Ordering::SeqCst);
-        let server_num = self.servers.len();
-
-        let threaded_rt = Builder::new_multi_thread().enable_all().build().unwrap();
-        loop {
-            info!(
-                "[Client {} -> Server {}] send [GetRequest key: \"{}\" index: {}]",
-                self.name, leader, args.key, args.index,
-            );
-            if let Ok(reply) = threaded_rt.block_on(self.servers[leader].get(&args)) {
-                info!(
-                    "[Client {} -> Server {}] recv [GetReply Ok: {} err: \"{}\" value: \"{}\"]",
-                    self.name, leader, reply.wrong_leader, reply.err, reply.value
-                );
-                if !reply.wrong_leader {
-                    last_leader.store(leader, Ordering::SeqCst);
-                    return reply.value;
-                }
-            }
-            leader = (leader + 1) % server_num;
-        }
-    }
-
-    /// shared by Put and Append.
-    //
-    // you can send an RPC with code like this:
-    // let reply = self.servers[i].put_append(args).unwrap();
-    fn put_append(&self, op: Op) {
-        // You will have to modify this function.
-        // crate::your_code_here(op)
-        let index = self.index.fetch_add(1, Ordering::SeqCst);
-        let args = match op {
-            Op::Put(key, value) => PutAppendRequest {
-                op: 1,
-                key,
-                value,
-                name: self.name.to_owned(),
-                index,
-            },
-            Op::Append(key, value) => PutAppendRequest {
-                op: 2,
-                key,
-                value,
-                name: self.name.to_owned(),
-                index,
-            },
-        };
-        let last_leader = self.last_leader.clone();
-        let mut leader = last_leader.load(Ordering::SeqCst);
-        let server_num = self.servers.len();
-
-        let threaded_rt = Builder::new_multi_thread().enable_all().build().unwrap();
-        loop {
-            info!(
-                "[Client {}] send [Server {}] [PutAppendRequest Op: {} Key: \"{}\" Value: \"{}\" Index: {}]",
-                self.name, leader, args.op, args.key, args.value,  args.index
-            );
-            if let Ok(reply) = threaded_rt.block_on(self.servers[leader].put_append(&args)) {
-                info!(
-                    "[Client {}] recv [Server {}] [PutAppendReply Wrong: {} Err: \"{}\"]",
-                    self.name, leader, reply.wrong_leader, reply.err
-                );
-                if !reply.wrong_leader {
-                    last_leader.store(leader, Ordering::SeqCst);
-                    return;
-                }
-            }
-            thread::sleep(Duration::from_millis(500));
-            leader = (leader + 1) % server_num;
-        }
+        info!("{} Get Request {}", self, args);
+        let reply = self.handle_request(args);
+        info!("{} Get Success {}", self, reply);
+        reply.value
     }
 
     pub fn put(&self, key: String, value: String) {
-        self.put_append(Op::Put(key, value))
+        let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let args = KvRequest {
+            op: 1,
+            key,
+            value,
+            name: self.name.to_owned(),
+            seq,
+        };
+        info!("{} Put Request {}", self, args);
+        let reply = self.handle_request(args);
+        info!("{} Put Success {}", self, reply);
     }
 
     pub fn append(&self, key: String, value: String) {
-        self.put_append(Op::Append(key, value))
+        let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let args = KvRequest {
+            op: 2,
+            key,
+            value,
+            name: self.name.to_owned(),
+            seq,
+        };
+        info!("{} Append Request {}", self, args);
+        let reply = self.handle_request(args);
+        info!("{} Append Success {}", self, reply);
     }
 }

@@ -31,7 +31,7 @@ fn election_timeout() -> Duration {
 
 fn heartbeat_timeout() -> Duration {
     // let variant = rand::thread_rng().gen_range(100, 104);
-    let variant = 200;
+    let variant = 100;
     Duration::from_millis(variant)
 }
 
@@ -265,8 +265,10 @@ impl Raft {
         }
     }
 
-    fn send_apply_msg(&self) {
-        while self.last_applied.load(Ordering::SeqCst) < self.commit_index.load(Ordering::SeqCst) {
+    fn send_apply_msg(&mut self) {
+        while !self.apply_ch.is_closed()
+            && self.last_applied.load(Ordering::SeqCst) < self.commit_index.load(Ordering::SeqCst)
+        {
             // let mut apply_ch = self.apply_ch.clone();
             let msg = ApplyMsg {
                 command_valid: true,
@@ -275,7 +277,6 @@ impl Raft {
                     .to_owned(),
                 command_index: self.last_applied.load(Ordering::SeqCst) + 1,
             };
-            // let handle = tokio::spawn(async move { apply_ch.send(msg).await });
             self.apply_ch
                 .unbounded_send(msg)
                 .expect("Unable send ApplyMsg");
@@ -876,15 +877,18 @@ impl Node {
 
         let mut raft_executor = RaftExecutor::new(raft);
         let threaded_rt = Builder::new_multi_thread().enable_all().build().unwrap();
-        let handle = thread::spawn(move || {
-            threaded_rt.block_on(async move {
-                debug!("Enter main executor!");
-                while raft_executor.next().await.is_some() {
-                    trace!("get event");
-                }
-                debug!("Leave main executor!");
+        let handle = thread::Builder::new()
+            .name(format!("RaftNode-{}", me))
+            .spawn(move || {
+                threaded_rt.block_on(async move {
+                    debug!("Enter main executor!");
+                    while raft_executor.next().await.is_some() {
+                        trace!("get event");
+                    }
+                    debug!("Leave main executor!");
+                })
             })
-        });
+            .unwrap();
         Node {
             handle: Arc::new(Mutex::new(handle)),
             me,
@@ -990,6 +994,7 @@ impl Node {
         // let mut sender = self.sender.clone();
         // threaded_rt.block_on(sender.send(RaftEvent::Shutdown));
         let _ = self.sender.unbounded_send(RaftEvent::Shutdown);
+        // self.handle.lock().unwrap().join().unwrap();
     }
 }
 

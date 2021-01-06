@@ -17,19 +17,22 @@ message PutAppendRequest {
     Op op = 3;
     // You'll have to add definitions here.
     string name = 4;
-    uint64 index = 5;
+    uint64 seq = 5;
 }
 
 message PutAppendReply {
     bool wrong_leader = 1;
     string err = 2;
+    Op op = 3;
+    string name = 4;
+    uint64 seq = 5;
 }
 
 message GetRequest {
     string key = 1;
     // You'll have to add definitions here.
     string name = 2;
-    uint64 index = 3;
+    uint64 seq = 3;
 }
 
 message GetReply {
@@ -38,10 +41,20 @@ message GetReply {
     string value = 3;
 }
 
-message KvCommand {
+message KvRequest {
     Op op = 1;
     string key = 2;
     string value = 3;
     string name = 4;
-    uint64 index = 5;
+    uint64 seq = 5;
+}
+
+message KvReply {
+    Op op = 1;
+    bool success = 2;
+    string err = 3;
+    string key = 4;
+    string value = 5;
+    string name = 6;
+    uint64 seq = 7;
 }
