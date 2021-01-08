@@ -9,6 +9,7 @@ pub mod raftpb {
             // rpc xxx(yyy) returns (zzz)
 
             rpc append_entries(AppendEntriesArgs) returns (AppendEntriesReply);
+            rpc install_snapshot(InstallSnapshotArgs) returns (InstallSnapshotReply);
         }
     }
     pub use self::raft::{
@@ -76,6 +77,28 @@ impl std::fmt::Display for AppendEntriesReply {
             "[AppendEntriesReply Term: {} Success: {} Conflict: {} {}]",
             self.term, self.success, self.conflict_log_index, self.conflict_log_term
         )
+    }
+}
+
+impl std::fmt::Display for InstallSnapshotArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "[InstallSnapshotArgs ID: {} Term: {} Last: {} {} Data: {} {} Done: {}]",
+            self.leader_id,
+            self.term,
+            self.last_included_index,
+            self.last_included_term,
+            self.offset,
+            self.data.len(),
+            self.done
+        )
+    }
+}
+
+impl std::fmt::Display for InstallSnapshotReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[InstallSnapshotReply Term: {}]", self.term)
     }
 }
 

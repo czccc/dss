@@ -82,6 +82,10 @@ pub struct Persistent {
     pub voted_for: i32,
     #[prost(message, repeated, tag = "3")]
     pub log: Vec<LogEntry>,
+    #[prost(uint64, tag = "4")]
+    pub last_included_index: u64,
+    #[prost(uint64, tag = "5")]
+    pub last_included_term: u64,
 }
 
 #[derive(PartialEq, Clone)]
@@ -123,6 +127,11 @@ pub struct Raft {
     // Reinitialized after election
     next_index: Vec<Arc<AtomicU64>>,
     match_index: Vec<Arc<AtomicU64>>,
+
+    // Volatile state on leader
+    // Reinitialized after election
+    last_included_index: Arc<AtomicU64>,
+    last_included_term: Arc<AtomicU64>,
 
     // RaftEvent channel used in RaftExecutor
     sender: UnboundedSender<RaftEvent>,
@@ -190,6 +199,9 @@ impl Raft {
             commit_index: Arc::new(AtomicU64::new(0)),
             last_applied: Arc::new(AtomicU64::new(0)),
 
+            last_included_index: Arc::new(AtomicU64::new(0)),
+            last_included_term: Arc::new(AtomicU64::new(0)),
+
             next_index: Vec::new(),
             match_index: Vec::new(),
 
@@ -226,9 +238,33 @@ impl Raft {
             current_term: self.current_term.load(Ordering::SeqCst),
             voted_for: self.voted_for.map_or(-1, |v| v as i32),
             log: self.log.clone(),
+            last_included_index: self.last_included_index.load(Ordering::SeqCst),
+            last_included_term: self.last_included_term.load(Ordering::SeqCst),
         };
         labcodec::encode(&per, &mut data).unwrap();
         self.persister.save_raft_state(data);
+    }
+
+    /// save Raft's persistent state to stable storage,
+    /// where it can later be retrieved after a crash and restart.
+    /// see paper's Figure 2 for a description of what should be persistent.
+    fn persist_with_snapshot(&mut self, snapshot: Vec<u8>) {
+        // Your code here (2C).
+        // Example:
+        // labcodec::encode(&self.xxx, &mut data).unwrap();
+        // labcodec::encode(&self.yyy, &mut data).unwrap();
+        // self.persister.save_raft_state(data);
+        let mut data = Vec::new();
+        // let msg = (&self.current_term, &self.voted_for, &self.log);
+        let per = Persistent {
+            current_term: self.current_term.load(Ordering::SeqCst),
+            voted_for: self.voted_for.map_or(-1, |v| v as i32),
+            log: self.log.clone(),
+            last_included_index: self.last_included_index.load(Ordering::SeqCst),
+            last_included_term: self.last_included_term.load(Ordering::SeqCst),
+        };
+        labcodec::encode(&per, &mut data).unwrap();
+        self.persister.save_state_and_snapshot(data, snapshot);
     }
 
     /// restore previously persisted state.
@@ -258,6 +294,8 @@ impl Raft {
                     }
                 };
                 self.log = o.log;
+                self.last_included_index = Arc::new(AtomicU64::new(o.last_included_index));
+                self.last_included_term = Arc::new(AtomicU64::new(o.last_included_term));
             }
             Err(e) => {
                 panic!("{:?}", e);
@@ -486,6 +524,62 @@ impl Raft {
         }
     }
 
+    // fn send_install_snapshot(
+    //     &self,
+    //     server: usize,
+    //     args: InstallSnapshotArgs,
+    // ) -> Receiver<Result<InstallSnapshotReply>> {
+    //     let peer = &self.peers[server];
+    //     let peer_clone = peer.clone();
+    //     let (tx, rx) = channel::<Result<InstallSnapshotReply>>();
+    //     peer.spawn(async move {
+    //         let res = peer_clone.install_snapshot(&args).await.map_err(Error::Rpc);
+    //         let _ = tx.send(res);
+    //     });
+    //     rx
+    // }
+
+    fn handle_install_snapshot(&mut self, args: InstallSnapshotArgs) -> InstallSnapshotReply {
+        if self.current_term.load(Ordering::SeqCst) < args.term {
+            self.voted_for = Some(args.leader_id as usize);
+            self.become_follower(args.term);
+            debug!(
+                "{} Become Follower. New Leader id: {}",
+                self, args.leader_id
+            );
+        }
+        if args.term == self.current_term.load(Ordering::SeqCst)
+            && args.last_included_index > self.last_included_index.load(Ordering::SeqCst)
+        {
+            self.log.drain(
+                ..(args.last_included_index - self.last_included_index.load(Ordering::SeqCst))
+                    as usize,
+            );
+            self.last_included_index
+                .store(args.last_included_index, Ordering::SeqCst);
+            self.last_included_term
+                .store(args.last_included_term, Ordering::SeqCst);
+            self.persist_with_snapshot(args.data.clone());
+            self.commit_index
+                .fetch_max(args.last_included_index, Ordering::SeqCst);
+            self.last_applied
+                .fetch_max(args.last_included_index, Ordering::SeqCst);
+
+            let msg = ApplyMsg {
+                command_valid: false,
+                command: args.data,
+                command_index: 0,
+            };
+            self.apply_ch
+                .unbounded_send(msg)
+                .expect("Unable send ApplyMsg");
+        }
+
+        InstallSnapshotReply {
+            term: self.current_term.load(Ordering::SeqCst),
+        }
+    }
+
     fn start(&mut self, command: &[u8]) -> Result<(u64, u64)> {
         let index = (self.log.len() + 1) as u64;
         let term = self.current_term.load(Ordering::SeqCst);
@@ -681,6 +775,7 @@ impl Raft {
 enum RaftEvent {
     RequestVote(RequestVoteArgs, Sender<RequestVoteReply>),
     AppendEntries(AppendEntriesArgs, Sender<AppendEntriesReply>),
+    InstallSnapshot(InstallSnapshotArgs, Sender<InstallSnapshotReply>),
     BecomeLeader(u64),
     BecomeFollower(u64),
     ReceiveCommand(Vec<u8>, Sender<Result<(u64, u64)>>),
@@ -754,6 +849,11 @@ impl Stream for RaftExecutor {
                     if reply.success || reply.term == current_term {
                         self.timeout.reset(election_timeout());
                     }
+                    let _ = tx.send(reply);
+                    Poll::Ready(Some(()))
+                }
+                RaftEvent::InstallSnapshot(args, tx) => {
+                    let reply = self.raft.handle_install_snapshot(args);
                     let _ = tx.send(reply);
                     Poll::Ready(Some(()))
                 }
@@ -971,6 +1071,19 @@ impl RaftService for Node {
         // info!("RaftService receive append entries");
         let (tx, rx) = channel();
         let event = RaftEvent::AppendEntries(args, tx);
+        let _ = self.sender.clone().send(event).await;
+        let reply = rx.await;
+        reply.map_err(labrpc::Error::Recv)
+    }
+
+    async fn install_snapshot(
+        &self,
+        args: InstallSnapshotArgs,
+    ) -> labrpc::Result<InstallSnapshotReply> {
+        // crate::your_code_here(args)
+        // info!("RaftService receive install snapshot");
+        let (tx, rx) = channel();
+        let event = RaftEvent::InstallSnapshot(args, tx);
         let _ = self.sender.clone().send(event).await;
         let reply = rx.await;
         reply.map_err(labrpc::Error::Recv)
