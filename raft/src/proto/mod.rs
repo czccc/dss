@@ -32,6 +32,53 @@ pub mod kvraftpb {
     pub use self::kv::{add_service as add_kv_service, Client as KvClient, Service as KvService};
 }
 
+use crate::proto::raftpb::*;
+
+impl std::fmt::Display for RequestVoteArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "[RequestVoteArgs ID: {} Term: {} Log: {} {}]",
+            self.candidate_id, self.term, self.last_log_index, self.last_log_term
+        )
+    }
+}
+
+impl std::fmt::Display for RequestVoteReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "[RequestVoteReply Term: {} Vote: {}]",
+            self.term, self.vote_granted
+        )
+    }
+}
+
+impl std::fmt::Display for AppendEntriesArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "[AppendEntriesArgs ID: {} Term: {} Commit: {} Log: {} {} {}]",
+            self.leader_id,
+            self.term,
+            self.leader_commit,
+            self.prev_log_index,
+            self.prev_log_term,
+            self.entries.len()
+        )
+    }
+}
+
+impl std::fmt::Display for AppendEntriesReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "[AppendEntriesReply Term: {} Success: {} Conflict: {} {}]",
+            self.term, self.success, self.conflict_log_index, self.conflict_log_term
+        )
+    }
+}
+
 use crate::proto::kvraftpb::*;
 
 impl std::fmt::Display for PutAppendRequest {

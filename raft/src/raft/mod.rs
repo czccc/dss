@@ -338,29 +338,22 @@ impl Raft {
     }
 
     fn handle_request_vote(&mut self, args: RequestVoteArgs) -> RequestVoteReply {
-        let description = format!(
-            "[Node {} {} {} {}]",
-            args.candidate_id, args.term, args.last_log_index, args.last_log_term
-        );
-        if args.term > self.current_term.load(Ordering::SeqCst) {
+        if self.current_term.load(Ordering::SeqCst) < args.term {
             self.voted_for = None;
             self.become_follower(args.term);
         }
 
         if args.term < self.current_term.load(Ordering::SeqCst) {
-            debug!(
-                "{} Handle request vote from {}, Vote false due to older term",
-                self, description
-            );
+            debug!("{} Handle {}, Vote false due to older term", self, args);
             RequestVoteReply {
                 term: self.current_term.load(Ordering::SeqCst),
                 vote_granted: false,
             }
         } else if self.voted_for.is_some() && self.voted_for != Some(args.candidate_id as usize) {
             debug!(
-                "{} Handle request vote from {}, Vote false due to already vote for {}",
+                "{} Handle {}, Vote false due to already vote for {}",
                 self,
-                description,
+                args,
                 self.voted_for.unwrap()
             );
             RequestVoteReply {
@@ -371,19 +364,13 @@ impl Raft {
             || ((self.log.len() as u64) > args.last_log_index
                 && args.last_log_term == self.log.last().map_or(0, |v| v.term))
         {
-            debug!(
-                "{} Handle request vote from {}, Vote false due to older log",
-                self, description
-            );
+            debug!("{} Handle {}, Vote false due to older log", self, args);
             RequestVoteReply {
                 term: args.term,
                 vote_granted: false,
             }
         } else {
-            debug!(
-                "{} Handle request vote from {}, Vote true",
-                self, description
-            );
+            debug!("{} Handle {}, Vote true", self, args);
             self.voted_for = Some(args.candidate_id as usize);
             RequestVoteReply {
                 term: args.term,
@@ -439,84 +426,62 @@ impl Raft {
     }
 
     fn handle_append_entries(&mut self, args: AppendEntriesArgs) -> AppendEntriesReply {
-        let description = format!(
-            "[Node {} {} {} - {} {} {}]",
-            args.leader_id,
-            args.term,
-            args.leader_commit,
-            args.prev_log_index,
-            args.prev_log_term,
-            args.entries.len()
-        );
-        if args.term < self.current_term.load(Ordering::SeqCst) {
+        if self.current_term.load(Ordering::SeqCst) < args.term {
+            self.voted_for = Some(args.leader_id as usize);
+            self.become_follower(args.term);
             debug!(
-                "{} Handle append entries from {}, Success false due to older term",
-                self, description
+                "{} Become Follower. New Leader id: {}",
+                self, args.leader_id
             );
+        }
+        if args.term < self.current_term.load(Ordering::SeqCst) {
+            debug!("{} Handle {}, Success false due to older term", self, args);
             AppendEntriesReply {
                 term: self.current_term.load(Ordering::SeqCst),
                 success: false,
                 conflict_log_index: 0,
                 conflict_log_term: 0,
             }
-        } else {
-            if self.role != RaftRole::Follower
-                || self.current_term.load(Ordering::SeqCst) < args.term
-            {
-                self.current_term.store(args.term, Ordering::SeqCst);
-                self.voted_for = Some(args.leader_id as usize);
-                self.role = RaftRole::Follower;
-                self.is_leader.store(false, Ordering::SeqCst);
-                debug!(
-                    "{} Become Follower. New Leader id: {}",
-                    self, args.leader_id
-                );
-                self.persist();
-            }
-            if args.prev_log_index > (self.log.len() as u64)
-                || args.prev_log_index > 0
-                    && self.log[(args.prev_log_index - 1) as usize].term != args.prev_log_term
-            {
-                debug!(
-                    "{} Handle append entries from {}, Success false due to log not match",
-                    self, description
-                );
-                let conflict_log_term = self
+        } else if args.prev_log_index > (self.log.len() as u64)
+            || args.prev_log_index > 0
+                && self.log[(args.prev_log_index - 1) as usize].term != args.prev_log_term
+        {
+            debug!(
+                "{} Handle {}, Success false due to log not match",
+                self, args
+            );
+            let conflict_log_term = self
+                .log
+                .get(max(min(args.prev_log_index as usize, self.log.len()), 1) - 1)
+                .map_or(0, |v| v.term);
+            AppendEntriesReply {
+                term: self.current_term.load(Ordering::SeqCst),
+                success: false,
+                conflict_log_term,
+                conflict_log_index: self
                     .log
-                    .get(max(min(args.prev_log_index as usize, self.log.len()), 1) - 1)
-                    .map_or(0, |v| v.term);
-                AppendEntriesReply {
-                    term: self.current_term.load(Ordering::SeqCst),
-                    success: false,
-                    conflict_log_term,
-                    conflict_log_index: self
-                        .log
-                        .iter()
-                        .filter(|v| v.term == conflict_log_term)
-                        .take(1)
-                        .next()
-                        .map_or(0, |v| v.index),
-                }
-            } else {
-                self.log.truncate(args.prev_log_index as usize);
-                self.log.extend(args.entries);
-                self.persist();
-                if args.leader_commit > self.commit_index.load(Ordering::SeqCst) {
-                    self.commit_index.store(
-                        min(args.leader_commit, self.log.len() as u64),
-                        Ordering::SeqCst,
-                    );
-                }
-                debug!(
-                    "{} Handle append entries from {}, Success true",
-                    self, description
+                    .iter()
+                    .filter(|v| v.term == conflict_log_term)
+                    .take(1)
+                    .next()
+                    .map_or(0, |v| v.index),
+            }
+        } else {
+            debug!("{} Handle {}, Success true", self, args);
+            self.log.truncate(args.prev_log_index as usize);
+            self.log.extend(args.entries);
+            self.persist();
+            if args.leader_commit > self.commit_index.load(Ordering::SeqCst) {
+                self.commit_index.store(
+                    min(args.leader_commit, self.log.len() as u64),
+                    Ordering::SeqCst,
                 );
-                AppendEntriesReply {
-                    term: self.current_term.load(Ordering::SeqCst),
-                    success: true,
-                    conflict_log_index: 0,
-                    conflict_log_term: 0,
-                }
+            }
+            AppendEntriesReply {
+                term: self.current_term.load(Ordering::SeqCst),
+                success: true,
+                conflict_log_index: 0,
+                conflict_log_term: 0,
             }
         }
     }
@@ -586,10 +551,7 @@ impl Raft {
             last_log_term: self.log.last().map_or(0, |v| v.term),
         };
         // let mut rx_vec = FuturesUnordered::new();
-        debug!(
-            "{} Send request vote to ALL Node, Args: [Node {} {} {} {}]",
-            self, args.candidate_id, args.term, args.last_log_index, args.last_log_term
-        );
+        debug!("{} Send {} to ALL Node", self, args);
         let is_candidate = Arc::new(AtomicBool::new(true));
         for server in 0..self.peers.len() {
             if server != self.me {
@@ -606,9 +568,8 @@ impl Raft {
                         if let Ok(reply) = reply {
                             if is_candidate.load(Ordering::SeqCst) {
                                 debug!(
-                                    "Get one request vote reply {} - {}, current {}, total {}",
-                                    reply.term,
-                                    reply.vote_granted,
+                                    "Get one {}, current {}, total {}",
+                                    reply,
                                     vote_count.load(Ordering::SeqCst),
                                     peers_num
                                 );
@@ -635,6 +596,7 @@ impl Raft {
         debug!("{} Send append entries to ALL Node", self);
         let term = self.current_term.load(Ordering::SeqCst);
         // let peers_num = self.peers.len();
+        self.match_index[self.me].store(self.log.len() as u64, Ordering::SeqCst);
         for server in 0..self.peers.len() {
             if server != self.me {
                 let prev_log_index = max(1, self.next_index[server].load(Ordering::SeqCst)) - 1;
@@ -662,17 +624,7 @@ impl Raft {
                     entries,
                     leader_commit: self.commit_index.load(Ordering::SeqCst),
                 };
-                debug!(
-                    "{} Send Append Entries to Node {} - [Node {} {} {} - {} {} {}]",
-                    self,
-                    server,
-                    args.leader_id,
-                    args.term,
-                    args.leader_commit,
-                    args.prev_log_index,
-                    args.prev_log_term,
-                    args.entries.len()
-                );
+                debug!("{} Send Node {} {} ", self, server, args);
                 // rx_vec.push(self.send_append_entries(server, args));
                 let rx = self.send_append_entries(server, args);
                 let is_leader = self.is_leader.clone();
