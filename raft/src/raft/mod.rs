@@ -128,10 +128,13 @@ pub struct Raft {
     next_index: Vec<Arc<AtomicU64>>,
     match_index: Vec<Arc<AtomicU64>>,
 
-    // Volatile state on leader
-    // Reinitialized after election
+    // Persistent state on all servers
+    // Add when using Snapshot
     last_included_index: Arc<AtomicU64>,
     last_included_term: Arc<AtomicU64>,
+
+    // current save size
+    // update when persist
     raft_state_size: Arc<AtomicU64>,
 
     // RaftEvent channel used in RaftExecutor
@@ -337,6 +340,122 @@ impl Raft {
             }
         }
     }
+
+    fn start(&mut self, command: &[u8]) -> Result<(u64, u64)> {
+        let index = self.log.len() as u64 + self.last_included_index.load(Ordering::SeqCst) + 1;
+        let term = self.current_term.load(Ordering::SeqCst);
+        let is_leader = self.is_leader.load(Ordering::SeqCst);
+        // Your code here (2B).
+
+        if is_leader {
+            self.log.push(LogEntry {
+                command: command.to_owned(),
+                index,
+                term,
+            });
+            self.log_index.store(index, Ordering::SeqCst);
+            info!(
+                "{} Receive a Command! Append to [log {} {}]",
+                self, index, term
+            );
+            self.match_index[self.me] = Arc::new(AtomicU64::new(index as u64));
+            self.persist();
+            Ok((index, term))
+        } else {
+            Err(Error::NotLeader)
+        }
+    }
+
+    fn get_last_log_info(&self) -> (u64, u64) {
+        let mut index = self.last_included_index.load(Ordering::SeqCst);
+        let mut term = self.last_included_term.load(Ordering::SeqCst);
+        index += self.log.len() as u64;
+        if !self.log.is_empty() {
+            term = self.log.last().unwrap().term;
+        }
+        (index, term)
+    }
+
+    fn become_leader(&mut self, term: u64) {
+        self.current_term.store(term, Ordering::SeqCst);
+        self.role = RaftRole::Leader;
+        self.is_leader.store(true, Ordering::SeqCst);
+        let (index, _term) = self.get_last_log_info();
+        for i in 0..self.peers.len() {
+            self.next_index[i] = Arc::new(AtomicU64::new(index + 1));
+            self.match_index[i] = Arc::new(AtomicU64::new(0));
+        }
+        self.match_index[self.me] = Arc::new(AtomicU64::new(index));
+        self.persist();
+
+        let last_included_index = self.last_included_index.load(Ordering::SeqCst);
+        self.commit_index
+            .store(last_included_index, Ordering::SeqCst);
+        self.last_applied
+            .store(last_included_index, Ordering::SeqCst);
+        let snapshot = self.persister.snapshot();
+        let msg = ApplyMsg {
+            command_valid: false,
+            command: snapshot,
+            command_index: 0,
+        };
+        self.apply_ch
+            .unbounded_send(msg)
+            .expect("Unable send ApplyMsg");
+
+        info!("{} Become Leader", self);
+    }
+
+    fn become_follower(&mut self, term: u64) {
+        self.current_term.store(term, Ordering::SeqCst);
+        // self.voted_for = None;
+        self.role = RaftRole::Follower;
+        self.is_leader.store(false, Ordering::SeqCst);
+        self.persist();
+        debug!("{} Become Follower", self);
+    }
+
+    fn become_candidate(&mut self) {
+        self.current_term.fetch_add(1, Ordering::SeqCst);
+        self.role = RaftRole::Candidate;
+        self.is_leader.store(false, Ordering::SeqCst);
+        self.voted_for = Some(self.me);
+        self.persist();
+        debug!("{} Become Candidate", self);
+
+        self.send_request_vote_all();
+    }
+
+    fn update_commit_index(&mut self) {
+        let last_included_index = self.last_included_index.load(Ordering::SeqCst);
+        let last_included_term = self.last_included_term.load(Ordering::SeqCst);
+        self.match_index[self.me].store(
+            self.log.len() as u64 + last_included_index,
+            Ordering::SeqCst,
+        );
+        let mut match_index_all: Vec<u64> = self
+            .match_index
+            .iter()
+            .map(|v| v.load(Ordering::SeqCst))
+            .collect();
+        match_index_all.sort_unstable();
+        let match_n = match_index_all[self.peers.len() / 2];
+        if match_n > self.commit_index.load(Ordering::SeqCst)
+            && (match_n == last_included_index
+                || self
+                    .log
+                    .get((match_n - last_included_index - 1) as usize)
+                    .map_or(last_included_term, |v| v.term)
+                    == self.current_term.load(Ordering::SeqCst))
+        {
+            debug!("{} Update commit index: {}", self, match_n);
+            self.commit_index.store(match_n, Ordering::SeqCst);
+        }
+        self.send_apply_msg();
+    }
+}
+
+impl Raft {
     /// example code to send a RequestVote RPC to a server.
     /// server is the index of the target server in peers.
     /// expects RPC arguments in args.
@@ -359,20 +478,6 @@ impl Raft {
         server: usize,
         args: RequestVoteArgs,
     ) -> Receiver<Result<RequestVoteReply>> {
-        // Your code here if you want the rpc becomes async.
-        // Example:
-        // ```
-        // let peer = &self.peers[server];
-        // let peer_clone = peer.clone();
-        // let (tx, rx) = channel();
-        // peer.spawn(async move {
-        //     let res = peer_clone.request_vote(&args).await.map_err(Error::Rpc);
-        //     tx.send(res);
-        // });
-        // rx
-        // ```
-        // let (tx, rx) = sync_channel::<Result<RequestVoteReply>>(1);
-        // crate::your_code_here((server, args, tx, rx))
         let peer = &self.peers[server];
         let peer_clone = peer.clone();
         let (tx, rx) = channel::<Result<RequestVoteReply>>();
@@ -428,6 +533,59 @@ impl Raft {
         }
     }
 
+    fn send_request_vote_all(&mut self) {
+        let vote_count = Arc::new(AtomicUsize::new(1));
+        let (last_log_index, last_log_term) = self.get_last_log_info();
+        let args = RequestVoteArgs {
+            term: self.current_term.load(Ordering::SeqCst),
+            candidate_id: self.me as i32,
+            last_log_index,
+            last_log_term,
+        };
+        // let mut rx_vec = FuturesUnordered::new();
+        info!("{} Send {} to ALL Node", self, args);
+        let is_candidate = Arc::new(AtomicBool::new(true));
+        for server in 0..self.peers.len() {
+            if server != self.me {
+                let args = args.clone();
+                let mut tx = self.sender.clone();
+                let peers_num = self.peers.len();
+                let is_candidate = is_candidate.clone();
+                let term = self.current_term.load(Ordering::SeqCst);
+                let vote_count = vote_count.clone();
+                // rx_vec.push(self.send_request_vote(server, args));
+                let rx = self.send_request_vote(server, args);
+                tokio::spawn(async move {
+                    if let Ok(reply) = rx.await {
+                        if let Ok(reply) = reply {
+                            if is_candidate.load(Ordering::SeqCst) {
+                                debug!(
+                                    "Get one {}, current {}, total {}",
+                                    reply,
+                                    vote_count.load(Ordering::SeqCst),
+                                    peers_num
+                                );
+                                if reply.term > term {
+                                    tx.send(RaftEvent::BecomeFollower(reply.term))
+                                        .await
+                                        .unwrap();
+                                } else if reply.vote_granted {
+                                    vote_count.fetch_add(1, Ordering::Relaxed);
+                                    if vote_count.load(Ordering::SeqCst) > peers_num / 2 {
+                                        is_candidate.store(false, Ordering::SeqCst);
+                                        tx.send(RaftEvent::BecomeLeader(reply.term)).await.unwrap();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        }
+    }
+}
+
+impl Raft {
     /// example code to send a RequestVote RPC to a server.
     /// server is the index of the target server in peers.
     /// expects RPC arguments in args.
@@ -450,20 +608,6 @@ impl Raft {
         server: usize,
         args: AppendEntriesArgs,
     ) -> Receiver<Result<AppendEntriesReply>> {
-        // Your code here if you want the rpc becomes async.
-        // Example:
-        // ```
-        // let peer = &self.peers[server];
-        // let peer_clone = peer.clone();
-        // let (tx, rx) = channel();
-        // peer.spawn(async move {
-        //     let res = peer_clone.request_vote(&args).await.map_err(Error::Rpc);
-        //     tx.send(res);
-        // });
-        // rx
-        // ```
-        // let (tx, rx) = sync_channel::<Result<RequestVoteReply>>(1);
-        // crate::your_code_here((server, args, tx, rx))
         let peer = &self.peers[server];
         let peer_clone = peer.clone();
         let (tx, rx) = channel::<Result<AppendEntriesReply>>();
@@ -572,203 +716,6 @@ impl Raft {
         }
     }
 
-    fn send_install_snapshot(
-        &self,
-        server: usize,
-        args: InstallSnapshotArgs,
-    ) -> Receiver<Result<InstallSnapshotReply>> {
-        let peer = &self.peers[server];
-        let peer_clone = peer.clone();
-        let (tx, rx) = channel::<Result<InstallSnapshotReply>>();
-        peer.spawn(async move {
-            let res = peer_clone.install_snapshot(&args).await.map_err(Error::Rpc);
-            let _ = tx.send(res);
-        });
-        rx
-    }
-
-    fn handle_install_snapshot(&mut self, args: InstallSnapshotArgs) -> InstallSnapshotReply {
-        if self.current_term.load(Ordering::SeqCst) < args.term {
-            self.voted_for = Some(args.leader_id as usize);
-            self.become_follower(args.term);
-            debug!(
-                "{} Become Follower. New Leader id: {}",
-                self, args.leader_id
-            );
-        }
-        if args.term == self.current_term.load(Ordering::SeqCst)
-            && args.last_included_index > self.last_included_index.load(Ordering::SeqCst)
-        {
-            let range = min(
-                self.log.len(),
-                (args.last_included_index - self.last_included_index.load(Ordering::SeqCst))
-                    as usize,
-            );
-            self.log.drain(..range);
-            self.last_included_index
-                .store(args.last_included_index, Ordering::SeqCst);
-            self.last_included_term
-                .store(args.last_included_term, Ordering::SeqCst);
-            self.persist_with_snapshot(args.data.clone());
-            self.commit_index
-                .fetch_max(args.last_included_index, Ordering::SeqCst);
-            self.last_applied
-                .fetch_max(args.last_included_index, Ordering::SeqCst);
-
-            let msg = ApplyMsg {
-                command_valid: false,
-                command: args.data,
-                command_index: 0,
-            };
-            self.apply_ch
-                .unbounded_send(msg)
-                .expect("Unable send ApplyMsg");
-        }
-
-        InstallSnapshotReply {
-            term: self.current_term.load(Ordering::SeqCst),
-        }
-    }
-
-    fn start(&mut self, command: &[u8]) -> Result<(u64, u64)> {
-        let index = self.log.len() as u64 + self.last_included_index.load(Ordering::SeqCst) + 1;
-        let term = self.current_term.load(Ordering::SeqCst);
-        let is_leader = self.is_leader.load(Ordering::SeqCst);
-        // Your code here (2B).
-
-        if is_leader {
-            self.log.push(LogEntry {
-                command: command.to_owned(),
-                index,
-                term,
-            });
-            self.log_index.store(index, Ordering::SeqCst);
-            info!(
-                "{} Receive a Command! Append to [log {} {}]",
-                self, index, term
-            );
-            self.match_index[self.me] = Arc::new(AtomicU64::new(index as u64));
-            self.persist();
-            Ok((index, term))
-        } else {
-            Err(Error::NotLeader)
-        }
-    }
-
-    fn get_last_log_info(&self) -> (u64, u64) {
-        let mut index = self.last_included_index.load(Ordering::SeqCst);
-        let mut term = self.last_included_term.load(Ordering::SeqCst);
-        index += self.log.len() as u64;
-        if !self.log.is_empty() {
-            term = self.log.last().unwrap().term;
-        }
-        (index, term)
-    }
-    // fn get_log_index(&self, index: usize) -> Option<usize> {
-    //     let last_included_index = self.last_included_index.load(Ordering::SeqCst);
-    //     if index < last_included_index as usize {
-    //         None
-    //     } else {
-    //         Some(index - last_included_index as usize)
-    //     }
-    // }
-    fn become_leader(&mut self, term: u64) {
-        self.current_term.store(term, Ordering::SeqCst);
-        self.role = RaftRole::Leader;
-        self.is_leader.store(true, Ordering::SeqCst);
-        let (index, _term) = self.get_last_log_info();
-        for i in 0..self.peers.len() {
-            self.next_index[i] = Arc::new(AtomicU64::new(index + 1));
-            self.match_index[i] = Arc::new(AtomicU64::new(0));
-        }
-        self.match_index[self.me] = Arc::new(AtomicU64::new(index));
-        self.persist();
-
-        let last_included_index = self.last_included_index.load(Ordering::SeqCst);
-        self.commit_index
-            .store(last_included_index, Ordering::SeqCst);
-        self.last_applied
-            .store(last_included_index, Ordering::SeqCst);
-        let snapshot = self.persister.snapshot();
-        let msg = ApplyMsg {
-            command_valid: false,
-            command: snapshot,
-            command_index: 0,
-        };
-        self.apply_ch
-            .unbounded_send(msg)
-            .expect("Unable send ApplyMsg");
-
-        info!("{} Become Leader", self);
-    }
-    fn become_follower(&mut self, term: u64) {
-        self.current_term.store(term, Ordering::SeqCst);
-        // self.voted_for = None;
-        self.role = RaftRole::Follower;
-        self.is_leader.store(false, Ordering::SeqCst);
-        self.persist();
-        debug!("{} Become Follower", self);
-    }
-    fn become_candidate(&mut self) {
-        self.current_term.fetch_add(1, Ordering::SeqCst);
-        self.role = RaftRole::Candidate;
-        self.is_leader.store(false, Ordering::SeqCst);
-        self.voted_for = Some(self.me);
-        self.persist();
-        debug!("{} Become Candidate", self);
-
-        self.send_request_vote_all();
-    }
-    fn send_request_vote_all(&mut self) {
-        let vote_count = Arc::new(AtomicUsize::new(1));
-        let (last_log_index, last_log_term) = self.get_last_log_info();
-        let args = RequestVoteArgs {
-            term: self.current_term.load(Ordering::SeqCst),
-            candidate_id: self.me as i32,
-            last_log_index,
-            last_log_term,
-        };
-        // let mut rx_vec = FuturesUnordered::new();
-        info!("{} Send {} to ALL Node", self, args);
-        let is_candidate = Arc::new(AtomicBool::new(true));
-        for server in 0..self.peers.len() {
-            if server != self.me {
-                let args = args.clone();
-                let mut tx = self.sender.clone();
-                let peers_num = self.peers.len();
-                let is_candidate = is_candidate.clone();
-                let term = self.current_term.load(Ordering::SeqCst);
-                let vote_count = vote_count.clone();
-                // rx_vec.push(self.send_request_vote(server, args));
-                let rx = self.send_request_vote(server, args);
-                tokio::spawn(async move {
-                    if let Ok(reply) = rx.await {
-                        if let Ok(reply) = reply {
-                            if is_candidate.load(Ordering::SeqCst) {
-                                debug!(
-                                    "Get one {}, current {}, total {}",
-                                    reply,
-                                    vote_count.load(Ordering::SeqCst),
-                                    peers_num
-                                );
-                                if reply.term > term {
-                                    tx.send(RaftEvent::BecomeFollower(reply.term))
-                                        .await
-                                        .unwrap();
-                                } else if reply.vote_granted {
-                                    vote_count.fetch_add(1, Ordering::Relaxed);
-                                    if vote_count.load(Ordering::SeqCst) > peers_num / 2 {
-                                        is_candidate.store(false, Ordering::SeqCst);
-                                        tx.send(RaftEvent::BecomeLeader(reply.term)).await.unwrap();
-                                    }
-                                }
-                            }
-                        }
-                    }
-                });
-            }
-        }
-    }
     fn send_append_entries_all(&mut self) {
         // let mut rx_vec = FuturesUnordered::new();
         debug!("{} Send append entries to ALL Node", self);
@@ -852,17 +799,6 @@ impl Raft {
                                     match_index.store(upper_log_index, Ordering::SeqCst);
                                     next_index.store(upper_log_index + 1, Ordering::SeqCst);
                                 } else {
-                                    // if next_index.load(Ordering::SeqCst) > 5 {
-                                    //     next_index.fetch_sub(5, Ordering::SeqCst);
-                                    // } else {
-                                    //     next_index.store(1, Ordering::SeqCst);
-                                    // }
-                                    // if let Some(v) = self
-                                    //     .log
-                                    //     .iter()
-                                    //     .filter(|v| v.term == reply.conflict_log_term)
-                                    //     .last()
-                                    // {}
                                     next_index.store(reply.conflict_log_index, Ordering::SeqCst);
                                 }
                             }
@@ -874,32 +810,65 @@ impl Raft {
             }
         }
     }
-    fn update_commit_index(&mut self) {
-        let last_included_index = self.last_included_index.load(Ordering::SeqCst);
-        let last_included_term = self.last_included_term.load(Ordering::SeqCst);
-        self.match_index[self.me].store(
-            self.log.len() as u64 + last_included_index,
-            Ordering::SeqCst,
-        );
-        let mut match_index_all: Vec<u64> = self
-            .match_index
-            .iter()
-            .map(|v| v.load(Ordering::SeqCst))
-            .collect();
-        match_index_all.sort_unstable();
-        let match_n = match_index_all[self.peers.len() / 2];
-        if match_n > self.commit_index.load(Ordering::SeqCst)
-            && (match_n == last_included_index
-                || self
-                    .log
-                    .get((match_n - last_included_index - 1) as usize)
-                    .map_or(last_included_term, |v| v.term)
-                    == self.current_term.load(Ordering::SeqCst))
-        {
-            debug!("{} Update commit index: {}", self, match_n);
-            self.commit_index.store(match_n, Ordering::SeqCst);
+}
+
+impl Raft {
+    fn send_install_snapshot(
+        &self,
+        server: usize,
+        args: InstallSnapshotArgs,
+    ) -> Receiver<Result<InstallSnapshotReply>> {
+        let peer = &self.peers[server];
+        let peer_clone = peer.clone();
+        let (tx, rx) = channel::<Result<InstallSnapshotReply>>();
+        peer.spawn(async move {
+            let res = peer_clone.install_snapshot(&args).await.map_err(Error::Rpc);
+            let _ = tx.send(res);
+        });
+        rx
+    }
+
+    fn handle_install_snapshot(&mut self, args: InstallSnapshotArgs) -> InstallSnapshotReply {
+        if self.current_term.load(Ordering::SeqCst) < args.term {
+            self.voted_for = Some(args.leader_id as usize);
+            self.become_follower(args.term);
+            debug!(
+                "{} Become Follower. New Leader id: {}",
+                self, args.leader_id
+            );
         }
-        self.send_apply_msg();
+        if args.term == self.current_term.load(Ordering::SeqCst)
+            && args.last_included_index > self.last_included_index.load(Ordering::SeqCst)
+        {
+            let range = min(
+                self.log.len(),
+                (args.last_included_index - self.last_included_index.load(Ordering::SeqCst))
+                    as usize,
+            );
+            self.log.drain(..range);
+            self.last_included_index
+                .store(args.last_included_index, Ordering::SeqCst);
+            self.last_included_term
+                .store(args.last_included_term, Ordering::SeqCst);
+            self.persist_with_snapshot(args.data.clone());
+            self.commit_index
+                .fetch_max(args.last_included_index, Ordering::SeqCst);
+            self.last_applied
+                .fetch_max(args.last_included_index, Ordering::SeqCst);
+
+            let msg = ApplyMsg {
+                command_valid: false,
+                command: args.data,
+                command_index: 0,
+            };
+            self.apply_ch
+                .unbounded_send(msg)
+                .expect("Unable send ApplyMsg");
+        }
+
+        InstallSnapshotReply {
+            term: self.current_term.load(Ordering::SeqCst),
+        }
     }
 }
 
@@ -1066,10 +1035,6 @@ pub struct Node {
 impl Node {
     /// Create a new raft service.
     pub fn new(raft: Raft) -> Node {
-        // Your code here.
-        // crate::your_code_here(raft)
-        // let raft = Arc::new(Mutex::new(raft));
-        // let raft_clone = raft.clone();
         let me = raft.me;
         let sender = raft.sender.clone();
         let term = raft.current_term.clone();
@@ -1122,11 +1087,6 @@ impl Node {
     where
         M: labcodec::Message,
     {
-        // Your code here.
-        // Example:
-        // self.raft.start(command)
-        // crate::your_code_here(command)
-
         if self.is_leader() {
             let mut buf = vec![];
             labcodec::encode(command, &mut buf).unwrap();
@@ -1202,12 +1162,7 @@ impl Node {
     /// a VIRTUAL crash in tester, so take care of background
     /// threads you generated with this Raft Node.
     pub fn kill(&self) {
-        // Your code here, if desired.
-        // let threaded_rt = Builder::new_multi_thread().build().unwrap();
-        // let mut sender = self.sender.clone();
-        // threaded_rt.block_on(sender.send(RaftEvent::Shutdown));
         let _ = self.sender.unbounded_send(RaftEvent::Shutdown);
-        // self.handle.lock().unwrap().join().unwrap();
     }
 }
 
@@ -1217,9 +1172,6 @@ impl RaftService for Node {
     //
     // CAVEATS: Please avoid locking or sleeping here, it may jam the network.
     async fn request_vote(&self, args: RequestVoteArgs) -> labrpc::Result<RequestVoteReply> {
-        // Your code here (2A, 2B).
-        // crate::your_code_here(args)
-        // info!("RaftService receive request vote");
         let (tx, rx) = channel();
         let event = RaftEvent::RequestVote(args, tx);
         let _ = self.sender.clone().send(event).await;
@@ -1228,8 +1180,6 @@ impl RaftService for Node {
     }
 
     async fn append_entries(&self, args: AppendEntriesArgs) -> labrpc::Result<AppendEntriesReply> {
-        // crate::your_code_here(args)
-        // info!("RaftService receive append entries");
         let (tx, rx) = channel();
         let event = RaftEvent::AppendEntries(args, tx);
         let _ = self.sender.clone().send(event).await;
@@ -1241,8 +1191,6 @@ impl RaftService for Node {
         &self,
         args: InstallSnapshotArgs,
     ) -> labrpc::Result<InstallSnapshotReply> {
-        // crate::your_code_here(args)
-        // info!("RaftService receive install snapshot");
         let (tx, rx) = channel();
         let event = RaftEvent::InstallSnapshot(args, tx);
         let _ = self.sender.clone().send(event).await;
