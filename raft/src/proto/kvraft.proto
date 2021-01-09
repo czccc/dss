@@ -58,3 +58,10 @@ message KvReply {
     string name = 6;
     uint64 seq = 7;
 }
+
+message Snapshot {
+    repeated string keys = 1;
+    repeated string values = 2;
+    repeated string clients = 3;
+    repeated uint64 seqs = 4;
+}

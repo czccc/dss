@@ -61,7 +61,7 @@ impl Clerk {
 
         let threaded_rt = Builder::new_multi_thread().enable_all().build().unwrap();
         loop {
-            debug!("{} -> [Server {}] send {}", self, leader, args);
+            debug!("{} send [Server {}]  {}", self, leader, args);
             if let Ok(Ok(reply)) = threaded_rt.block_on(async {
                 tokio::select! {
                     _ = Delay::new(Duration::from_millis(4000)) => {
@@ -72,7 +72,7 @@ impl Clerk {
                     }
                 }
             }) {
-                debug!("{} <- [Server {}] recv {}", self, leader, reply);
+                debug!("{} recv [Server {}] {}", self, leader, reply);
                 if reply.success {
                     last_leader.store(leader, Ordering::SeqCst);
                     return reply;

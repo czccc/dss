@@ -44,6 +44,7 @@ pub struct KvServer {
     // Clone from Raft
     term: Arc<AtomicU64>,
     is_leader: Arc<AtomicBool>,
+    raft_state_size: Arc<AtomicU64>,
 
     // DB
     db: Mutex<HashMap<String, String>>,
@@ -72,13 +73,15 @@ impl KvServer {
         // You may need initialization code here.
 
         let (tx, apply_ch) = unbounded();
+        let snapshot = persister.snapshot();
         let rf = raft::Raft::new(servers, me, persister, tx);
         let rf = raft::Node::new(rf);
         let term = rf.term.clone();
         let is_leader = rf.is_leader.clone();
+        let raft_state_size = rf.raft_state_size.clone();
         let (sender, receiver) = unbounded();
 
-        KvServer {
+        let mut server = KvServer {
             rf,
             me,
             maxraftstate,
@@ -87,13 +90,55 @@ impl KvServer {
             receiver,
             term,
             is_leader,
+            raft_state_size,
             db: Mutex::new(HashMap::new()),
             pending: HashMap::new(),
             last_index: HashMap::new(),
+        };
+        server.restore_from_snapshot(snapshot);
+        server
+    }
+
+    fn create_snapshot(&self) -> Vec<u8> {
+        let mut data = Vec::new();
+        let db = self.db.lock().unwrap().clone();
+        let snapshot = Snapshot {
+            keys: db.keys().cloned().collect(),
+            values: db.values().cloned().collect(),
+            clients: self.last_index.keys().cloned().collect(),
+            seqs: self
+                .last_index
+                .values()
+                .cloned()
+                .map(|v| v.load(Ordering::SeqCst))
+                .collect(),
+        };
+        labcodec::encode(&snapshot, &mut data).unwrap();
+        data
+    }
+
+    fn restore_from_snapshot(&mut self, snapshot: Vec<u8>) {
+        if let Ok(snapshot) = labcodec::decode::<Snapshot>(&snapshot) {
+            let db: HashMap<String, String> = snapshot
+                .keys
+                .into_iter()
+                .zip(snapshot.values.into_iter())
+                .collect();
+            let last_index: HashMap<String, Arc<AtomicU64>> = snapshot
+                .clients
+                .into_iter()
+                .zip(
+                    snapshot
+                        .seqs
+                        .into_iter()
+                        .map(|v| Arc::new(AtomicU64::new(v))),
+                )
+                .collect();
+            self.db = Mutex::new(db);
+            self.last_index = last_index;
         }
     }
 
-    // fn check_client(&self) {}
     fn handle_request(&mut self, args: KvRequest, sender: Sender<KvReply>) {
         if self.is_leader.load(Ordering::SeqCst) {
             info!("{} recv {}", self, args);
@@ -155,6 +200,8 @@ impl KvServer {
 
     fn handle_apply_msg(&mut self, msg: ApplyMsg) {
         if !msg.command_valid {
+            debug!("{} recv [Snapshot]", self);
+            self.restore_from_snapshot(msg.command);
             return;
         }
         debug!(
@@ -233,6 +280,13 @@ impl KvServer {
                     }
                 }
             }
+        }
+        if self.maxraftstate.is_some()
+            && self.raft_state_size.load(Ordering::SeqCst) > self.maxraftstate.unwrap() as u64
+        {
+            let snapshot = self.create_snapshot();
+            info!("{} create Snapshot with index {}", self, index);
+            self.rf.start_snapshot(snapshot, index);
         }
     }
 }
