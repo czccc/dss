@@ -15,6 +15,7 @@ This project is followed with [Talent Plan](https://github.com/pingcap/talent-pl
 - `raft`:
     - a series of labs on a key/value storage system built with the Raft consensus algorithm. 
     - These labs are derived from the [lab2:raft](http://nil.csail.mit.edu/6.824/2018/labs/lab-raft.html) and [lab3:kvraft](http://nil.csail.mit.edu/6.824/2018/labs/lab-kvraft.html) from the famous [MIT 6.824](http://nil.csail.mit.edu/6.824/2018/index.html) course but rewritten in Rust.
+    - origin paper: [In Search of an Understandable Consensus Algorithm (Extended Version)](https://raft.github.io/raft.pdf)
     - see more in [raft/README.md](./raft/README.md)
 - `report`: some log output file
 
