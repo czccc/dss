@@ -16,7 +16,7 @@ This project is followed with [Talent Plan](https://github.com/pingcap/talent-pl
     - a series of labs on a key/value storage system built with the Raft consensus algorithm. 
     - These labs are derived from the [lab2:raft](http://nil.csail.mit.edu/6.824/2018/labs/lab-raft.html) and [lab3:kvraft](http://nil.csail.mit.edu/6.824/2018/labs/lab-kvraft.html) from the famous [MIT 6.824](http://nil.csail.mit.edu/6.824/2018/index.html) course but rewritten in Rust.
     - see more in [raft/README.md](./raft/README.md)
-
+- `report`: some log output file
 
 ## Feature
 
@@ -24,7 +24,7 @@ This project is followed with [Talent Plan](https://github.com/pingcap/talent-pl
 - writen with pure Rust and ProtoBuf protocol
 - use [`prost`](https://docs.rs/prost/0.7.0/prost/) to parse ProtoBuf message
 - use [`log`](https://docs.rs/log/0.4.13/log/) and [`env_logger`](https://docs.rs/env_logger/0.8.2/env_logger/) as log format
-- largely use `futures` and `tokio` to achieve asynchrony
+- largely use [`futures`](https://docs.rs/futures/0.3.12/futures/) and [`tokio`](https://docs.rs/tokio/1.0.2/tokio/) to achieve asynchrony
 
 ## Progress:
 
