@@ -1,6 +1,6 @@
 # Distributed Systems in Rust
 
-This project is followed with [Talent Plan](https://github.com/pingcap/talent-plan) from [PingCAP University](https://university.pingcap.com/).
+This project is followed with [Talent Plan](https://github.com/pingcap/talent-plan) from [PingCAP University](https://university.pingcap.com/). Origin README can find [here](./README.tp.md)
 
 ## Project Workspaces
 
