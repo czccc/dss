@@ -308,37 +308,24 @@ enum KvEvent {
     Shutdown,
 }
 
-struct KvExecutor {
-    server: KvServer,
-}
-
-impl KvExecutor {
-    fn new(kv: KvServer) -> KvExecutor {
-        KvExecutor { server: kv }
-    }
-}
-
-impl Stream for KvExecutor {
+impl Stream for KvServer {
     type Item = ();
 
     fn poll_next(
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Option<Self::Item>> {
-        match self.server.receiver.poll_next_unpin(cx) {
+        match self.receiver.poll_next_unpin(cx) {
             Poll::Ready(Some(event)) => {
-                debug!("{} Executor recv [Event]", self.server);
+                debug!("{} Executor recv [Event]", self);
                 return match event {
                     KvEvent::Request(args, tx) => {
-                        debug!(
-                            "{} -> [Client {}] Executor recv {}",
-                            self.server, args.name, args
-                        );
-                        self.server.handle_request(args, tx);
+                        debug!("{} -> [Client {}] Executor recv {}", self, args.name, args);
+                        self.handle_request(args, tx);
                         Poll::Ready(Some(()))
                     }
                     KvEvent::Shutdown => {
-                        self.server.rf.kill();
+                        self.rf.kill();
                         Poll::Ready(None)
                     }
                 };
@@ -346,9 +333,9 @@ impl Stream for KvExecutor {
             Poll::Ready(None) => {}
             Poll::Pending => {}
         }
-        match self.server.apply_ch.poll_next_unpin(cx) {
+        match self.apply_ch.poll_next_unpin(cx) {
             Poll::Ready(Some(msg)) => {
-                self.server.handle_apply_msg(msg);
+                self.handle_apply_msg(msg);
                 Poll::Ready(Some(()))
             }
             Poll::Ready(None) => Poll::Ready(Some(())),
@@ -386,7 +373,7 @@ pub struct Node {
 }
 
 impl Node {
-    pub fn new(kv: KvServer) -> Node {
+    pub fn new(mut kv: KvServer) -> Node {
         // Your code here.
         // crate::your_code_here(kv);
         let me = kv.me;
@@ -394,14 +381,13 @@ impl Node {
         let term = kv.term.clone();
         let is_leader = kv.is_leader.clone();
 
-        let mut raft_executor = KvExecutor::new(kv);
         let threaded_rt = Builder::new_multi_thread().enable_all().build().unwrap();
         let handle = thread::Builder::new()
             .name(format!("KvServerNode-{}", me))
             .spawn(move || {
                 threaded_rt.block_on(async move {
                     debug!("Enter KvRaft main executor!");
-                    while raft_executor.next().await.is_some() {
+                    while kv.next().await.is_some() {
                         trace!("KvRaft: Get event");
                     }
                     debug!("Leave KvRaft main executor!");

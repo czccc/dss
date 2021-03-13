@@ -13,11 +13,6 @@ use tokio::runtime::Builder;
 
 use crate::proto::kvraftpb::*;
 
-// enum Op {
-//     Put(String, String),
-//     Append(String, String),
-// }
-
 pub struct Clerk {
     pub name: String,
     pub servers: Vec<KvClient>,
