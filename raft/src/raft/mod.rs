@@ -463,6 +463,37 @@ impl Raft {
 }
 
 impl Raft {
+    fn last_index(&self) -> u64 {
+        self.log
+            .last()
+            .map_or(self.last_included_index.load(Ordering::SeqCst), |v| v.index)
+    }
+    fn last_term(&self) -> u64 {
+        self.log
+            .last()
+            .map_or(self.last_included_term.load(Ordering::SeqCst), |v| v.term)
+    }
+    fn term(&self, idx: u64) -> Option<u64> {
+        let last_included_index = self.last_included_index.load(Ordering::SeqCst);
+        if idx < last_included_index {
+            None
+        } else if idx == last_included_index {
+            Some(self.last_included_term.load(Ordering::SeqCst))
+        } else if idx <= self.last_index() {
+            Some(self.log[(idx - last_included_index - 1) as usize].term)
+        } else {
+            None
+        }
+    }
+    fn match_term(&self, idx: u64, term: u64) -> bool {
+        self.term(idx).map(|t| t == term).unwrap_or(false)
+    }
+    fn is_up_to_date(&self, last_index: u64, term: u64) -> bool {
+        term > self.last_term() || (term == self.last_term() && last_index >= self.last_index())
+    }
+}
+
+impl Raft {
     /// example code to send a RequestVote RPC to a server.
     /// server is the index of the target server in peers.
     /// expects RPC arguments in args.
@@ -496,18 +527,16 @@ impl Raft {
     }
 
     fn handle_request_vote(&mut self, args: RequestVoteArgs) -> RequestVoteReply {
-        if self.current_term.load(Ordering::SeqCst) < args.term {
+        let current_term = self.current_term.load(Ordering::SeqCst);
+        if current_term < args.term {
             self.voted_for = None;
             self.become_follower(args.term);
         }
 
-        let last_included_index = self.last_included_index.load(Ordering::SeqCst);
-        let last_included_term = self.last_included_term.load(Ordering::SeqCst);
-
-        if args.term < self.current_term.load(Ordering::SeqCst) {
+        if args.term < current_term {
             debug!("{} Handle {}, Vote false due to older term", self, args);
             RequestVoteReply {
-                term: self.current_term.load(Ordering::SeqCst),
+                term: current_term,
                 vote_granted: false,
             }
         } else if self.voted_for.is_some() && self.voted_for != Some(args.candidate_id as usize) {
@@ -521,10 +550,7 @@ impl Raft {
                 term: args.term,
                 vote_granted: false,
             }
-        } else if (self.log.last().map_or(last_included_term, |v| v.term) > args.last_log_term)
-            || ((self.log.len() as u64) + last_included_index > args.last_log_index
-                && args.last_log_term == self.log.last().map_or(last_included_term, |v| v.term))
-        {
+        } else if !self.is_up_to_date(args.last_log_index, args.last_log_term) {
             debug!("{} Handle {}, Vote false due to older log", self, args);
             RequestVoteReply {
                 term: args.term,
@@ -629,7 +655,9 @@ impl Raft {
         let last_included_index = self.last_included_index.load(Ordering::SeqCst);
         let last_included_term = self.last_included_term.load(Ordering::SeqCst);
 
-        if self.current_term.load(Ordering::SeqCst) < args.term {
+        let current_term = self.current_term.load(Ordering::SeqCst);
+
+        if current_term < args.term {
             self.voted_for = Some(args.leader_id as usize);
             self.become_follower(args.term);
             debug!(
@@ -637,10 +665,10 @@ impl Raft {
                 self, args.leader_id
             );
         }
-        if args.term < self.current_term.load(Ordering::SeqCst) {
+        if args.term < current_term {
             debug!("{} Handle {}, Success false due to older term", self, args);
             AppendEntriesReply {
-                term: self.current_term.load(Ordering::SeqCst),
+                term: current_term,
                 success: false,
                 conflict_log_index: 0,
                 conflict_log_term: 0,
@@ -653,40 +681,21 @@ impl Raft {
                 "{} Handle {}, Success false due to Snapshot not match",
                 self, args
             );
-            let conflict_log_term = self.log.get(0).map_or(last_included_term, |v| v.term);
             AppendEntriesReply {
-                term: self.current_term.load(Ordering::SeqCst),
+                term: current_term,
                 success: false,
-                conflict_log_term,
-                conflict_log_index: self
-                    .log
-                    .iter()
-                    .filter(|v| v.term == conflict_log_term)
-                    .take(1)
-                    .next()
-                    .map_or(last_included_index, |v| v.index),
+                conflict_log_term: last_included_term,
+                conflict_log_index: last_included_index,
             }
-        } else if args.prev_log_index > (last_included_index + self.log.len() as u64)
+        } else if args.prev_log_index > self.last_index()
             || args.prev_log_index > last_included_index
-                && self.log[(args.prev_log_index - last_included_index - 1) as usize].term
-                    != args.prev_log_term
+                && !self.match_term(args.prev_log_index, args.prev_log_term)
         {
             debug!(
                 "{} Handle {}, Success false due to log not match",
                 self, args
             );
-            let conflict_log_term = self
-                .log
-                .get(
-                    max(
-                        min(
-                            (args.prev_log_index - last_included_index) as usize,
-                            self.log.len(),
-                        ),
-                        1,
-                    ) - 1,
-                )
-                .map_or(last_included_term, |v| v.term);
+            let conflict_log_term = self.term(args.prev_log_index).unwrap_or(last_included_term);
             AppendEntriesReply {
                 term: self.current_term.load(Ordering::SeqCst),
                 success: false,
@@ -706,13 +715,8 @@ impl Raft {
             self.log.extend(args.entries);
             self.persist();
             if args.leader_commit > self.commit_index.load(Ordering::SeqCst) {
-                self.commit_index.store(
-                    min(
-                        args.leader_commit,
-                        self.log.len() as u64 + last_included_index,
-                    ),
-                    Ordering::SeqCst,
-                );
+                self.commit_index
+                    .store(min(args.leader_commit, self.last_index()), Ordering::SeqCst);
             }
             AppendEntriesReply {
                 term: self.current_term.load(Ordering::SeqCst),
